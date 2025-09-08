@@ -1,0 +1,8 @@
+requests
+beautifulsoup4
+lxml
+selenium==4.21.0
+schedule
+flask
+google-generativeai
+python-dotenv

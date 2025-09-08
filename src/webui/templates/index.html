@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ebooks Manager Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .log-viewer { white-space: pre-wrap; word-wrap: break-word; font-family: 'Courier New', Courier, monospace; }
+        .card { backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+        .status-success { color: #22c55e; }
+        .status-failure { color: #ef4444; }
+        .btn-disabled { opacity: 0.5; cursor: not-allowed; }
+    </style>
+    <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
+</head>
+<body class="bg-gray-900 text-gray-200">
+    <div class="container mx-auto p-4 md:p-8">
+        <header class="mb-8 text-center">
+            <h1 class="text-4xl font-bold text-white mb-2">📚 Ebooks Manager Dashboard</h1>
+            <p class="text-gray-400">Sync status for Goodreads to StoryGraph</p>
+        </header>
+
+        <main class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <!-- Left Column: History & Recommendations -->
+            <div class="lg:col-span-2 space-y-8">
+                <!-- Sync History -->
+                <section id="history" class="card bg-gray-800/50 p-6 rounded-lg shadow-lg">
+                    <div class="flex justify-between items-center mb-4 border-b border-gray-700 pb-2">
+                         <h2 class="text-2xl font-semibold text-white">Sync History</h2>
+                         <button id="sync-now-btn" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300">
+                            🔄 Sync Now
+                        </button>
+                    </div>
+                    <div class="overflow-x-auto max-h-96">
+                        <table class="w-full text-left">
+                            <thead class="sticky top-0 bg-gray-800">
+                                <tr>
+                                    <th class="p-3">Timestamp</th>
+                                    <th class="p-3">Status</th>
+                                    <th class="p-3">Details</th>
+                                </tr>
+                            </thead>
+                            <tbody id="history-table-body">
+                                <tr><td colspan="3" class="p-4 text-center">Loading history...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+                
+                <!-- Recommendations -->
+                <section id="recommendations" class="card bg-gray-800/50 p-6 rounded-lg shadow-lg">
+                    <div class="flex justify-between items-center mb-4 border-b border-gray-700 pb-2">
+                        <h2 class="text-2xl font-semibold text-white">AI Book Recommendations</h2>
+                        <button id="get-recs-btn" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300">
+                            ✨ Get Recs
+                        </button>
+                    </div>
+                    <div id="recs-container" class="space-y-4">
+                        <p class="text-gray-400">Click the button to get book recommendations based on your latest reads!</p>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Right Column: Logs -->
+            <div class="lg:col-span-1">
+                <section id="logs" class="card bg-gray-800/50 p-6 rounded-lg shadow-lg h-full">
+                    <h2 class="text-2xl font-semibold mb-4 text-white border-b border-gray-700 pb-2">Live Log Viewer</h2>
+                    <div id="log-container" class="bg-gray-900 p-4 rounded-md h-[40rem] overflow-y-auto log-viewer text-sm">
+                        Loading logs...
+                    </div>
+                </section>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        const historyTableBody = document.getElementById('history-table-body');
+        const logContainer = document.getElementById('log-container');
+        const recsContainer = document.getElementById('recs-container');
+        const getRecsBtn = document.getElementById('get-recs-btn');
+        const syncNowBtn = document.getElementById('sync-now-btn');
+
+        function formatTimestamp(isoString) {
+            return isoString ? new Date(isoString).toLocaleString() : 'N/A';
+        }
+
+        async function fetchHistory() {
+            try {
+                const response = await fetch('/api/history');
+                const history = await response.json();
+                historyTableBody.innerHTML = '';
+                if (history.length === 0) {
+                    historyTableBody.innerHTML = '<tr><td colspan="3" class="p-4 text-center">No history found.</td></tr>';
+                    return;
+                }
+                history.forEach(entry => {
+                    const statusClass = entry.status === 'Success' ? 'status-success' : 'status-failure';
+                    const books = entry.books_processed || [];
+                    const details = entry.status === 'Success' 
+                        ? `${books.length} book(s) synced: ${books.join(', ') || 'None'}`
+                        : `Error: ${entry.error || 'Unknown'}`;
+                    historyTableBody.innerHTML += `<tr class="border-b border-gray-700 hover:bg-gray-700/50"><td class="p-3">${formatTimestamp(entry.timestamp)}</td><td class="p-3 font-semibold ${statusClass}">${entry.status}</td><td class="p-3 text-gray-400">${details}</td></tr>`;
+                });
+            } catch (error) {
+                historyTableBody.innerHTML = '<tr><td colspan="3" class="p-4 text-center text-red-500">Failed to load history.</td></tr>';
+            }
+        }
+
+        async function fetchLogs() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                logContainer.textContent = data.log_content;
+                logContainer.scrollTop = logContainer.scrollHeight;
+            } catch (error) {
+                logContainer.textContent = 'Failed to load logs.';
+            }
+        }
+        
+        async function triggerSync() {
+            syncNowBtn.disabled = true;
+            syncNowBtn.classList.add('btn-disabled');
+            syncNowBtn.textContent = 'Syncing...';
+            try {
+                await fetch('/api/sync-now', { method: 'POST' });
+                setTimeout(() => { fetchLogs(); fetchHistory(); }, 5000);
+            } finally {
+                 setTimeout(() => {
+                    syncNowBtn.disabled = false;
+                    syncNowBtn.classList.remove('btn-disabled');
+                    syncNowBtn.textContent = '🔄 Sync Now';
+                }, 5000);
+            }
+        }
+
+        async function fetchRecommendations() {
+            recsContainer.innerHTML = '<p class="text-indigo-400">Getting recommendations from the AI wizard...</p>';
+            getRecsBtn.disabled = true;
+            getRecsBtn.classList.add('btn-disabled');
+            try {
+                const response = await fetch('/api/recommendations');
+                const data = await response.json();
+                if (data.error) throw new Error(data.error);
+                if (typeof data.recommendations === 'string') {
+                     recsContainer.innerHTML = `<p class="text-gray-300">${data.recommendations}</p>`;
+                     return;
+                }
+                recsContainer.innerHTML = '';
+                data.recommendations.forEach(rec => {
+                    recsContainer.innerHTML += `<div class="bg-gray-700/50 p-4 rounded-lg"><h3 class="font-bold text-lg text-white">${rec.title}</h3><p class="text-sm text-gray-400 mb-2">by ${rec.author}</p><p class="text-gray-300"><em>"${rec.reason}"</em></p></div>`;
+                });
+            } catch (error) {
+                recsContainer.innerHTML = `<p class="text-red-500">Failed to get recommendations: ${error.message}</p>`;
+            } finally {
+                getRecsBtn.disabled = false;
+                getRecsBtn.classList.remove('btn-disabled');
+            }
+        }
+
+        // Initial & periodic data fetch
+        fetchHistory();
+        fetchLogs();
+        setInterval(() => { fetchHistory(); fetchLogs(); }, 30000);
+        
+        getRecsBtn.addEventListener('click', fetchRecommendations);
+        syncNowBtn.addEventListener('click', triggerSync);
+    </script>
+</body>
+</html>

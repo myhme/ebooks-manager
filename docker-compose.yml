@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    container_name: ebooks-manager-app
+    ports:
+      - "${WEBUI_PORT:-5002}:5002"
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+    shm_size: '2g' # Allocate shared memory for Chrome
+    restart: unless-stopped
