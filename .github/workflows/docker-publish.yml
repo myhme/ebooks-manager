@@ -1,0 +1,78 @@
+name: Docker Publish for Ebooks-Manager
+
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: 'Docker tags (e.g., latest, beta, specific version). Defaults to branch name or "latest" for main.'
+        required: false
+        default: '' # Will be derived if empty
+
+  # Triggers the workflow on push events for the main and beta branches
+  push:
+    branches:
+      - main
+      - beta
+      
+  schedule:
+    - cron: '10 5 * * 4'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-push-docker-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read  # To checkout the repository
+      packages: write # To push packages to GitHub Container Registry (GHCR)
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # QEMU is used by buildx to emulate ARM on x86 runners
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        # You can create a new builder instance here if needed, e.g.:
+        # id: buildx
+        # with:
+        #   driver-opts: image=moby/buildkit:master
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }} 
+          password: ${{ secrets.GITHUB_TOKEN }}    
+
+      - name: Determine Docker metadata (tags and labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/torgo 
+          tags: |
+            type=ref,event=branch 
+            type=ref,event=pr
+            type=semver,pattern={{version}} 
+            type=sha 
+            type=raw,value=${{ github.event.inputs.tags }},enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tags != '' }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image (multi-platform)
+        uses: docker/build-push-action@v5
+        with:
+          context: . 
+          file: ./Dockerfile 
+          platforms: linux/arm64,linux/amd64 # Added platforms
+          push: true 
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Caching can speed up builds (optional)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
