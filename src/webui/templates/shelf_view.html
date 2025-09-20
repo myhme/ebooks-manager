@@ -1,0 +1,28 @@
+{% extends "layout.html" %}
+{% block title %}{{ shelf_name | capitalize }} Shelf{% endblock %}
+{% block header %}{{ shelf_name | capitalize }} Shelf (Sync Status: {{ sync_status }}){% endblock %}
+{% block content %}
+<table>
+    <thead>
+        <tr>
+            <th>Title</th>
+            <th>Author</th>
+            <th>Goodreads ID</th>
+            <th>URL</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for book in books %}
+        <tr>
+            <td>{{ book.title }}</td>
+            <td>{{ book.author }}</td>
+            <td>{{ book.goodreads_id }}</td>
+            <td><a href="{{ book.book_url }}">View</a></td>
+        </tr>
+        {% endfor %}
+        {% if not books %}
+        <tr><td colspan="4">No books found.</td></tr>
+        {% endif %}
+    </tbody>
+</table>
+{% endblock %}

@@ -5,8 +5,7 @@ import os
 
 def main():
     config = load_config()
-    log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
-    logger = setup_logger(config['log_file'], log_level)
+    setup_logger(config['log_file'], os.getenv('LOG_LEVEL', 'INFO'))
     orchestrate_sync()
 
 if __name__ == "__main__":

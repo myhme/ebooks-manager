@@ -1,11 +1,63 @@
+version: '3.8'
 services:
-  app:
-    build: .
-    container_name: ebooks-manager-app
-    ports:
-      - "${WEBUI_PORT:-5002}:5002"
-    volumes:
-      - ./config:/app/config
-      - ./logs:/app/logs
-    shm_size: '2g' # Allocate shared memory for Chrome
+  ebooks-manager:
+    build:
+      context: .
+    container_name: ebooks-manager
     restart: unless-stopped
+    env_file: /mnt/data/docker/docker-scripts/.env
+    profiles:
+      - "ebooks"
+      - "mediaserver"
+    labels:
+      - "com.priority=24"
+      - "homepage.group=Media Server"
+      - "homepage.name=Book Manager"
+      - "homepage.icon=download.svg"
+      - "homepage.href=http://ebooks-manager.mayserver.local"
+    depends_on:
+      calibre-web:
+        condition: service_healthy
+      byparr-default:
+        condition: service_healthy
+    environment:
+      - UID=${PUID}
+      - GID=${PGID}
+      - TZ=${TZ}
+      - FLARESOLVERR_URL=http://127.0.0.1:8191/v1
+      - FLASK_HOST=0.0.0.0
+      - FLASK_PORT=5002
+      - LOG_LEVEL=DEBUG
+      - DRY_RUN=no
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+      - WEBPAGE_CACHE_DAYS=30
+    volumes:
+      - /mnt/data/media/local/books/ingest:/cwa-book-ingest
+      - /mnt/data/docker/docker-config/ebooks-manager/config:/app/config
+      - /mnt/data/docker/docker-config/ebooks-manager/logs:/app/logs
+      - /mnt/data/docker/docker-config/ebooks-manager/data:/app/data
+    network_mode: "service:adguardhome_essential"
+    shm_size: '4gb'
+    ports:
+      - "5002:5002"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5002/status"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - CAPTCHA_SOLVER=none
+    ports:
+      - "8191:8191"
+    restart: unless-stopped
+    network_mode: "service:adguardhome_essential"

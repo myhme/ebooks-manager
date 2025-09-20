@@ -1,0 +1,49 @@
+{% extends "layout.html" %}
+{% block title %}Status{% endblock %}
+{% block header %}Ebooks Manager Status{% endblock %}
+{% block content %}
+<p>This page automatically refreshes every 60 seconds. Last updated: {{ now | strftime }}</p>
+
+<h2>Sync History (Newest First)</h2>
+<table>
+    <thead>
+        <tr>
+            <th style="width:15%">Timestamp</th>
+            <th style="width:10%">Action</th>
+            <th>Book Title / ID</th>
+            <th>Details</th>
+            <th style="width:10%">Status</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% if history %}
+            {% for entry in history %}
+            <tr>
+                <td>{{ entry.timestamp | strftime }}</td>
+                <td><strong>{{ entry.action | capitalize }}</strong></td>
+                <td>
+                    <strong>{{ entry.title or 'N/A' }}</strong><br>
+                    <small>ID: <code>{{ entry.book_id or '' }}</code></small>
+                </td>
+                <td>
+                    {% if entry.query %}Query: <code>{{ entry.query }}</code><br>{% endif %}
+                    {% if entry.result_id %}Result ID: <code>{{ entry.result_id }}</code>{% endif %}
+                </td>
+                <td>
+                    {% if entry.status %}
+                        <span class="status-{{ entry.status | lower }}">{{ entry.status | replace('_', ' ') | capitalize }}</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        {% else %}
+            <tr>
+                <td colspan="5" style="text-align: center;">No history entries yet.</td>
+            </tr>
+        {% endif %}
+    </tbody>
+</table>
+
+<h2>Recent Logs (Last 50 lines)</h2>
+<pre><code>{{ log_content or 'Log file is empty or not found.' }}</code></pre>
+{% endblock %}

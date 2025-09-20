@@ -1,0 +1,31 @@
+{% extends "layout.html" %}
+{% block title %}Status{% endblock %}
+{% block header %}Ebooks Manager Status{% endblock %}
+{% block content %}
+  <p>Last updated: {{ now }}</p>
+  <h2>Sync State</h2>
+  <p>Running: <strong>{{ sync_state.running }}</strong> — Last started: {{ sync_state.last_started }} — Last finished: {{ sync_state.last_finished }} — Last result: {{ sync_state.last_result }}</p>
+
+  <h2>Sync History (Newest first)</h2>
+  <table>
+    <thead><tr><th>Timestamp</th><th>Action</th><th>Title/ID</th><th>Details</th><th>Status</th></tr></thead>
+    <tbody>
+      {% if history %}
+        {% for entry in history %}
+          <tr>
+            <td>{{ entry.timestamp | strftime }}</td>
+            <td>{{ entry.action }}</td>
+            <td><strong>{{ entry.title or 'N/A' }}</strong><br><small>ID: <code>{{ entry.book_id or '' }}</code></small></td>
+            <td>{% if entry.query %}Query: <code>{{ entry.query }}</code>{% endif %}</td>
+            <td>{{ entry.status }}</td>
+          </tr>
+        {% endfor %}
+      {% else %}
+        <tr><td colspan="5">No history yet.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+
+  <h2>Recent Logs</h2>
+  <pre style="max-height:400px;overflow:auto;background:#222;color:#eee;padding:10px;border-radius:6px">{{ log_content or 'No logs available' }}</pre>
+{% endblock %}
