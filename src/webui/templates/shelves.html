@@ -1,0 +1,19 @@
+{% extends "layout.html" %}
+{% block title %}Shelves{% endblock %}
+{% block header %}Shelves{% endblock %}
+{% block content %}
+  <ul>
+    {% for s in shelves %}
+      <li><a href="{{ url_for('shelf_view', shelf_name=s) }}">{{ s }}</a> — <button onclick="fetchShelf('{{ s }}')">Sync</button></li>
+    {% endfor %}
+  </ul>
+  <script>
+    async function fetchShelf(s){
+      try{
+        const res = await fetch('/sync', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({shelf:s})});
+        const js = await res.json();
+        alert(js.message || 'Started');
+      }catch(e){ alert('Fail:'+e) }
+    }
+  </script>
+{% endblock %}

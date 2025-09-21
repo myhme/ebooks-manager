@@ -1,80 +1,165 @@
-from flask import Flask, render_template, jsonify, request
-from pathlib import Path
+# src/webui/app.py
+import os
 import logging
-from datetime import datetime
-import json
-from src.utils.config_loader import load_config
-from src.sync_logic import orchestrate_sync
-from src.scrapers.goodreads import GoodreadsScraper
+from flask import Flask, request, render_template, send_from_directory, jsonify, redirect, url_for
+from urllib.parse import urlencode
+from pathlib import Path
 
-app = Flask(__name__)
+from src.utils.database import Database
 
+LOG = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-@app.template_filter('strftime')
-def _jinja2_filter_datetime(date_str, fmt='%Y-%m-%d %H:%M:%S'):
-    if not date_str:
-        return "N/A"
-    try:
-        if isinstance(date_str, str):
-            dt = datetime.fromisoformat(date_str)
-        elif isinstance(date_str, datetime):
-            dt = date_str
-        else:
-            return date_str
-        return dt.strftime(fmt)
-    except (ValueError, TypeError):
-        return date_str
+app = Flask(__name__, template_folder="templates", static_folder="static")
 
-@app.route('/')
-@app.route('/status')
-def status():
-    history_path = Path('/app/logs/history.json')
-    history = []
-    log_path = Path('/app/logs/sync_log.txt')
-    log_content = ""
-    if history_path.exists():
-        try:
-            with open(history_path, 'r') as f:
-                content = f.read()
-                if content:
-                    history = json.loads(content)
-                    history.reverse()
-        except json.JSONDecodeError:
-            logging.warning("History file is malformed or empty.")
-        except Exception as e:
-            logging.error(f"Error reading history file: {e}", exc_info=True)
-    try:
-        if log_path.exists():
-            with open(log_path, 'r') as f:
-                lines = f.readlines()
-                log_content = "".join(lines[-50:])
-    except Exception as e:
-        logging.error(f"Error reading log file: {e}", exc_info=True)
-    return render_template('status.html', history=history, log_content=log_content, now=datetime.now())
+# Configuration defaults - override via env if needed
+PER_PAGE_DEFAULT = int(os.getenv("WEBUI_PER_PAGE", "30"))
+COVER_DIR = os.getenv("COVERS_DIR", "/app/data/cache/covers")
+DOWNLOAD_BACKEND_URL = os.getenv("DOWNLOAD_BACKEND_URL", "http://localhost:8080")  # optional
 
-@app.route('/history')
-def history():
-    return status()
+# Ensure cover dir exists
+Path(COVER_DIR).mkdir(parents=True, exist_ok=True)
 
-@app.route('/sync', methods=['GET', 'POST'])
-def sync():
-    if request.method == 'POST':
-        try:
-            orchestrate_sync()
-            return jsonify({'status': 'success', 'message': 'Sync triggered successfully'})
-        except Exception as e:
-            logging.error(f"Sync failed: {e}", exc_info=True)
-            return jsonify({'status': 'error', 'message': str(e)}), 500
-    return render_template('sync.html')
+# Create DB instance (uses default path if not configured)
+DB_PATH = os.getenv("GOODREADS_DB_PATH", "/app/data/databases/goodreads.db")
+db = Database(DB_PATH)
 
-@app.route('/shelf/<shelf_name>')
+
+@app.route("/")
+def index():
+    # redirect to a default shelf page
+    return redirect(url_for("shelf_view", shelf_name="to-read"))
+
+
+@app.route("/shelf/<shelf_name>")
 def shelf_view(shelf_name):
-    config = load_config()
-    scraper = GoodreadsScraper(config)
-    books = scraper.get_goodreads_books_from_shelf(shelf_name)
-    sync_status = "Last sync: N/A"  # TODO: Pull from history or DB
-    return render_template('shelf_view.html', books=books, shelf_name=shelf_name, sync_status=sync_status)
+    """
+    Renders shelf table using DB results (not live scraping).
+    Query params:
+      - page (1-indexed)
+      - per_page
+    """
+    try:
+        page = int(request.args.get("page", "1"))
+        per_page = int(request.args.get("per_page", str(PER_PAGE_DEFAULT)))
+    except Exception:
+        page = 1
+        per_page = PER_PAGE_DEFAULT
+
+    offset = (page - 1) * per_page
+    books = db.get_books_by_shelf(shelf_name, limit=per_page, offset=offset)
+
+    # compute serial numbers for display
+    for idx, b in enumerate(books):
+        b["_serial"] = offset + idx + 1
+        # choose cover src: local if available, else remote
+        if b.get("cover_local_path"):
+            b["_cover_src"] = f"/covers/{b['cover_local_path']}"
+        elif b.get("cover_url"):
+            b["_cover_src"] = b["cover_url"]
+        else:
+            b["_cover_src"] = "/static/img/cover-placeholder.png"
+
+        # author normalization for UI
+        if not b.get("author_first") and b.get("author"):
+            # quick fallback: "Lastname, Firstname" -> "Firstname Lastname"
+            a = b.get("author")
+            if "," in a:
+                parts = [p.strip() for p in a.split(",")]
+                if len(parts) >= 2:
+                    b["author_first"] = " ".join(parts[::-1])
+                else:
+                    b["author_first"] = a
+            else:
+                b["author_first"] = a
+
+    # total pages calculation (rough)
+    total = db.row_count()
+    total_pages = max(1, (total + per_page - 1) // per_page)
+
+    return render_template("shelf_view.html",
+                           shelf_name=shelf_name,
+                           books=books,
+                           page=page,
+                           per_page=per_page,
+                           total_pages=total_pages)
+
+
+@app.route("/covers/<path:filename>")
+def serve_cover(filename):
+    """Serve downloaded covers from the shared cache directory."""
+    # secure path by disallowing ../
+    filename = os.path.basename(filename)
+    return send_from_directory(COVER_DIR, filename)
+
+
+# Downloads page - UI will poll the underlying download backend
+@app.route("/downloads")
+def downloads_page():
+    return render_template("downloads.html")
+
+
+# Simple API proxy helpers for the webui to talk to the download backend.
+# First try to use an in-process backend module if present; otherwise forward via HTTP.
+
+def _call_backend_api(path, params=None):
+    """
+    Calls backend via HTTP. Caller should handle exceptions.
+    """
+    import requests
+    params = params or {}
+    url = DOWNLOAD_BACKEND_URL.rstrip("/") + "/" + path.lstrip("/")
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        LOG.exception("Backend HTTP call failed %s %s", url, e)
+        return {"error": str(e)}
+
+
+@app.route("/webui/api/download", methods=["POST"])
+def webui_queue_download():
+    """
+    Queue a download for a goodreads book id.
+    Body: json { "id": "<goodreads_id>", "priority": <int> }
+    """
+    data = request.get_json() or {}
+    gid = data.get("id") or request.form.get("id")
+    priority = int(data.get("priority", 0))
+    if not gid:
+        return jsonify({"error": "id required"}), 400
+
+    # Try in-process backend first (if available)
+    try:
+        import backend as local_backend  # optional in your project
+        ok = local_backend.queue_book(gid, priority)
+        if ok:
+            return jsonify({"status": "queued", "id": gid})
+    except Exception:
+        LOG.debug("No local backend or queue_book failed; falling back to HTTP")
+
+    # Fallback to calling external backend API
+    resp = _call_backend_api("/api/download", params={"id": gid, "priority": priority})
+    return jsonify(resp)
+
+
+@app.route("/webui/api/status")
+def webui_status():
+    try:
+        import backend as local_backend
+        status = local_backend.queue_status()
+        return jsonify(status)
+    except Exception:
+        return jsonify(_call_backend_api("/api/status"))
+
+
+# Serve static status partial used within pages
+@app.route("/status_partial")
+def status_partial():
+    history = db.get_history(limit=200)
+    return render_template("status.html", history=history)
+
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5002, debug=False)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=os.getenv("DEBUG", "0") == "1")
