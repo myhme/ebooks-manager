@@ -47,6 +47,7 @@ FLASK_PORT=5002
 DRY_RUN=yes
 PYTHONUNBUFFERED=1
 WEBPAGE_CACHE_DAYS=30
+
 EOF
 mkdir -p "data"
 mkdir -p "data/cache"
@@ -95,6 +96,7 @@ gunicorn --bind 0.0.0.0:5002 --workers 1 --threads 2 --timeout 120 --log-file /a
 # Run the scheduler in the foreground
 echo "Starting scheduler..."
 exec python3 /app/src/job_runner.py
+
 EOF
 
 echo "Creating file: scripts/script.sh"
@@ -104,32 +106,36 @@ set -e
 
 # Example script for running the project or performing maintenance tasks
 exec python3 /app/src/main.py
+
 EOF
 mkdir -p "config"
 
 echo "Creating file: config/config.json.template"
 cat << 'EOF' > "config/config.json.template"
 {
-  "goodreads_username": "your_goodreads_email",
-  "goodreads_password": "your_goodreads_password",
-  "goodreads_user_id": "your_goodreads_user_id",
-  "cwa_api_url": "http://calibre-web:8084/request/api",
-  "cwa_username": "your_cwa_username",
-  "cwa_password": "your_cwa_password",
-  "database_path": "/app/data/databases/goodreads.db",
-  "log_file": "/app/logs/sync_log.txt",
-  "history_file": "/app/logs/history.json",
-  "cache_dir": "/app/data/cache"
+    "goodreads_username": "your_goodreads_email",
+    "goodreads_password": "your_goodreads_password",
+    "goodreads_user_id": "your_goodreads_user_id",
+    "cwa_api_url": "http://calibre-web:8084/request/api",
+    "cwa_username": "your_cwa_username",
+    "cwa_password": "your_cwa_password",
+    "database_path": "/app/data/databases/goodreads.db",
+    "log_file": "/app/logs/sync_log.txt",
+    "history_file": "/app/logs/history.json",
+    "cache_dir": "/app/data/cache",
+    "goodreads_per_page": 100
 }
 EOF
 mkdir -p "logs"
 
 echo "Creating file: logs/sync_log.txt"
 cat << 'EOF' > "logs/sync_log.txt"
+
 EOF
 
 echo "Creating file: logs/history.json"
 cat << 'EOF' > "logs/history.json"
+
 EOF
 mkdir -p "logs/screenshots"
 
@@ -141,7 +147,8 @@ flask==3.0.3
 selenium==4.23.1
 gunicorn==20.1.0
 apscheduler==3.10.4
-Pillow==10.1.0EOF
+Pillow==10.1.0
+EOF
 
 echo "Creating file: Dockerfile"
 cat << 'EOF' > "Dockerfile"
@@ -207,7 +214,8 @@ ENV PYTHONPATH=/app \
 USER appuser
 
 # Entry point
-CMD ["/app/scripts/entrypoint.sh"]EOF
+CMD ["/app/scripts/entrypoint.sh"]
+EOF
 mkdir -p "src"
 
 echo "Creating file: src/bootstrap.py"
@@ -311,6 +319,7 @@ def check_and_create_app_files():
 
 if __name__ == "__main__":
     check_and_create_app_files()
+
 EOF
 mkdir -p "src/api"
 
@@ -374,41 +383,76 @@ class CWAClient:
                 logging.error(f"Status check failed: {e}", exc_info=True)
                 time.sleep(wait_seconds)
         return False
+
 EOF
 
 echo "Creating file: src/api/__init__.py"
 cat << 'EOF' > "src/api/__init__.py"
+
 EOF
 
 echo "Creating file: src/sync_logic.py"
 cat << 'EOF' > "src/sync_logic.py"
+# src/sync_logic.py
 import logging
 from src.scrapers.goodreads import GoodreadsScraper
-from src.scrapers.hardcover import HardcoverScraper
-from src.scrapers.storygraph import StorygraphScraper
 from src.utils.config_loader import load_config
+from src.utils.database import Database
 
-def orchestrate_sync():
+LOG = logging.getLogger(__name__)
+
+def orchestrate_sync(shelves=None):
+    """
+    If shelves is None -> syncs default shelf 'to-download'.
+    shelves can be a string or list of shelf names.
+    """
     config = load_config()
-    logger = logging.getLogger()
+    db = Database(config['database_path'])
+    scraper = GoodreadsScraper(config)
+    if not shelves:
+        shelves = ['to-download']
+    if isinstance(shelves, str):
+        shelves = [shelves]
 
-    # Initialize scrapers
-    goodreads_scraper = GoodreadsScraper(config)
-    hardcover_scraper = HardcoverScraper(config)
-    storygraph_scraper = StorygraphScraper(config)
+    for shelf in shelves:
+        try:
+            LOG.info("Starting sync for shelf: %s", shelf)
+            books = scraper.get_goodreads_books_from_shelf(shelf)
+            if not books:
+                LOG.info("No books returned for shelf %s", shelf)
+                continue
+            for b in books:
+                # Save book to DB with shelf association
+                db.save_book(b, shelves=[shelf])
+                db.add_history(action='fetch_shelf', book_id=b['goodreads_id'], title=b.get('title'), status='fetched', meta={'shelf': shelf})
+                # Optionally, kick off cwa request (if enabled)
+                # For safety -- only if DRY_RUN is disabled and shelf is 'to-download'
+                if config.get('dry_run', False) or (shelf != 'to-download'):
+                    continue
+                try:
+                    # request download via CWA and track
+                    results = scraper.cwa_client.search_book(f"{b['title']} {b['author']}")
+                    if not results or not results.get('results'):
+                        db.add_history(action='search', book_id=b['goodreads_id'], title=b.get('title'), status='no_results')
+                        continue
+                    best = results['results'][0]
+                    # create a download record
+                    dl_internal_id = db.create_download(b['goodreads_id'], result_id=str(best.get('id')), download_id=None, status='requested', meta={'result_meta': best})
+                    download_id = scraper.cwa_client.request_download(best.get('id'))
+                    if download_id:
+                        db.update_download(dl_internal_id, status='started', download_id=str(download_id))
+                        ok = scraper.cwa_client.check_download_status(download_id)
+                        db.update_download(dl_internal_id, status='success' if ok else 'failure')
+                        db.add_history(action='download', book_id=b['goodreads_id'], title=b.get('title'), status='success' if ok else 'failure')
+                    else:
+                        db.update_download(dl_internal_id, status='failed_to_request')
+                        db.add_history(action='download', book_id=b['goodreads_id'], title=b.get('title'), status='failed_to_request')
+                except Exception:
+                    LOG.exception("CWA download failed for %s", b['goodreads_id'])
+                    db.add_history(action='download', book_id=b['goodreads_id'], title=b.get('title'), status='error')
+        except Exception:
+            LOG.exception("Sync for shelf %s failed", shelf)
 
-    # Run Goodreads sync
-    logger.info("Starting Goodreads sync")
-    try:
-        goodreads_scraper.sync()
-        logger.info("Goodreads sync completed")
-    except Exception as e:
-        logger.error(f"Goodreads sync failed: {e}", exc_info=True)
-
-    # Placeholder for other scrapers
-    logger.info("Hardcover and Storygraph sync not implemented yet")
-    # hardcover_scraper.sync()
-    # storygraph_scraper.sync()
 EOF
 
 echo "Creating file: src/main.py"
@@ -426,6 +470,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 EOF
 mkdir -p "src/scrapers"
 
@@ -438,6 +483,7 @@ class HardcoverScraper:
 
     def sync(self):
         pass
+
 EOF
 
 echo "Creating file: src/scrapers/storygraph.py"
@@ -449,97 +495,144 @@ class StorygraphScraper:
 
     def sync(self):
         pass
+
 EOF
 
 echo "Creating file: src/scrapers/goodreads.py"
 cat << 'EOF' > "src/scrapers/goodreads.py"
 # src/scrapers/goodreads.py
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException
-from bs4 import BeautifulSoup
-from pathlib import Path
-import json
-import logging
-import time
 import os
-import requests
+import re
+import time
+import json
 import pickle
+import logging
+import requests
+from pathlib import Path
 from datetime import datetime
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlencode, urlparse, parse_qs
 
-from src.utils.database import Database
-from src.api.cwa_client import CWAClient
+from bs4 import BeautifulSoup
+
+# Selenium imports (used when available)
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException, WebDriverException
+except Exception:
+    webdriver = None
+    Service = None
+    Options = None
+    By = None
+    WebDriverWait = None
+    TimeoutException = None
+    WebDriverException = None
+
+try:
+    from src.utils.database import Database
+except Exception:
+    # fallback to local import if running in different context
+    from utils.database import Database
+
+try:
+    from src.api.cwa_client import CWAClient
+except Exception:
+    CWAClient = None
 
 LOG = logging.getLogger(__name__)
 
-# Common cookie names that often indicate an authenticated session
-LIKELY_SESSION_COOKIE_NAMES = [
-    'session-id', 'sess', 's', 'auth_token', 'gr_user', 'cgcsess', 'session', 'csm-hit'
-]
+# cookies that likely indicate logged-in state
+LIKELY_SESSION_COOKIE_NAMES = ['session-id', 'sess', 's', 'auth_token', 'gr_user', 'cgcsess', 'session']
 
 class GoodreadsScraper:
-    def __init__(self, config):
-        self.config = config
-        self.user_id = config.get('goodreads_user_id')
-        self.goodreads_email = config.get('goodreads_username')
-        self.goodreads_password = config.get('goodreads_password')
-        self.shelf_name = 'to-download'
+    def __init__(self, config: dict):
+        """
+        config: dictionary-like object, keys:
+            - goodreads_user_id
+            - cache_dir (optional, default /app/data/cache)
+            - goodreads_per_page (optional, default 100)
+            - chromedriver_path, chromium_bin, HEADLESS env handled
+            - database_path (for Database init)
+            - cwa_api_url/username/password (optional)
+        """
+        self.config = config or {}
+        self.user_id = str(self.config.get('goodreads_user_id') or self.config.get('GOODREADS_USER_ID') or "")
         self.base_url = 'https://www.goodreads.com'
-        self.cache_dir = Path(config.get('cache_dir', '/app/data/cache')) / 'webpages' / 'goodreads' / 'ebooks'
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.screenshot_dir = Path(config.get('log_file', '/app/logs/sync_log.txt')).parent / 'screenshots'
-        self.screenshot_dir.mkdir(parents=True, exist_ok=True)
-        self.cookie_file = Path(config.get('cache_dir', '/app/data/cache')) / 'logins' / 'goodreads' / 'cookies.pkl'
+        cache_dir = Path(self.config.get('cache_dir', '/app/data/cache'))
+        self.cache_dir = cache_dir
+        self.cookie_file = cache_dir / 'logins' / 'goodreads' / 'cookies.pkl'
         self.cookie_file.parent.mkdir(parents=True, exist_ok=True)
-        self.db = Database(config.get('database_path'))
-        self.cwa_client = CWAClient(
-            config.get('cwa_api_url'),
-            config.get('cwa_username'),
-            config.get('cwa_password'),
-            config.get('cache_dir')
-        )
-        self.is_debug = os.getenv('LOG_LEVEL', 'INFO').upper() == 'DEBUG'
-        self.dry_run = os.getenv('DRY_RUN', 'no').lower() == 'yes'
+        self.cover_cache = cache_dir / 'covers'
+        self.cover_cache.mkdir(parents=True, exist_ok=True)
+
+        # per_page configurable; allow string or int; default = 100
+        try:
+            self.per_page = int(self.config.get('goodreads_per_page', self.config.get('GOODREADS_PER_PAGE', 100)))
+        except Exception:
+            self.per_page = 100
+
+        # WebDriver settings
         self.driver = None
-        self.logged_in = False
-        self._selenium_available = True
+        self._selenium_available = bool(webdriver and Options and Service)
+        self._init_selenium_settings()
+
+        # DB and optional CWA client
+        db_path = self.config.get('database_path') or self.config.get('DATABASE_PATH') or '/app/data/databases/goodreads.db'
+        self.db = Database(db_path)
+        self.cwa_client = None
+        if CWAClient and (self.config.get('cwa_api_url') or os.getenv('CWA_API_URL')):
+            try:
+                self.cwa_client = CWAClient(self.config.get('cwa_api_url'), self.config.get('cwa_username'), self.config.get('cwa_password'), str(self.cache_dir))
+            except Exception:
+                LOG.exception("Failed to init CWA client")
+
+        LOG.info("GoodreadsScraper initialized user=%s per_page=%d", self.user_id, self.per_page)
+
+    def _init_selenium_settings(self):
+        # only set these here; actual driver init in _init_driver
+        self.headless = os.getenv('HEADLESS', '1') == '1'
+        self.chromium_bin = os.getenv('CHROMIUM_BIN', '/usr/bin/chromium')
+        self.chromedriver_path = os.getenv('CHROMEDRIVER_PATH', '/usr/bin/chromedriver')
 
     def _init_driver(self):
         if self.driver:
             return self.driver
+        if not self._selenium_available:
+            LOG.info("Selenium not available in environment")
+            return None
         try:
             options = Options()
-            headless = os.getenv('HEADLESS', '1') == '1'
-            if headless:
-                options.add_argument('--headless=new')
+            if self.headless:
+                # newer chrome uses '--headless=new'
+                try:
+                    options.add_argument('--headless=new')
+                except Exception:
+                    options.add_argument('--headless')
             options.add_argument('--no-sandbox')
             options.add_argument('--disable-dev-shm-usage')
             options.add_argument('--disable-gpu')
-            options.add_argument('--disable-extensions')
-            options.add_argument('--window-size=1920,1080')
+            options.add_argument('--window-size=1600,1200')
             ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0 Safari/537.36"
             options.add_argument(f'user-agent={ua}')
-            chromium_bin = os.getenv('CHROMIUM_BIN', '/usr/bin/chromium')
-            if Path(chromium_bin).exists():
-                options.binary_location = chromium_bin
-
-            chromedriver_path = os.getenv('CHROMEDRIVER_PATH', '/usr/bin/chromedriver')
-            if not Path(chromedriver_path).exists():
-                LOG.error("ChromeDriver not found at %s", chromedriver_path)
+            if Path(self.chromium_bin).exists():
+                options.binary_location = self.chromium_bin
+            if not Path(self.chromedriver_path).exists():
+                LOG.warning("Chromedriver not found at %s - Selenium disabled", self.chromedriver_path)
                 self._selenium_available = False
                 return None
-
-            service = Service(executable_path=chromedriver_path)
+            service = Service(executable_path=self.chromedriver_path)
             self.driver = webdriver.Chrome(service=service, options=options)
-            LOG.info("Driver initialized successfully")
             return self.driver
-        except WebDriverException as e:
-            LOG.error("Failed to initialize driver: %s", e, exc_info=True)
+        except WebDriverException:
+            LOG.exception("Failed to init Selenium driver")
+            self._selenium_available = False
+            return None
+        except Exception:
+            LOG.exception("Selenium init error")
             self._selenium_available = False
             return None
 
@@ -550,112 +643,6 @@ class GoodreadsScraper:
             except Exception:
                 pass
         self.driver = None
-        self.logged_in = False
-
-    def _take_screenshot(self, name, force=False):
-        """
-        Save a screenshot and overlay the current URL at the top.
-        If Pillow is unavailable or overlay fails, still save the raw screenshot.
-        """
-        if not self.driver or not (self.is_debug or force):
-            return
-        try:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = self.screenshot_dir / f"{name}_{ts}.png"
-            # try to set window size to full page height (best effort)
-            try:
-                height = self.driver.execute_script(
-                    "return Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);"
-                )
-                width = self.driver.execute_script(
-                    "return Math.max(document.body.scrollWidth, document.documentElement.scrollWidth);"
-                )
-                w = min(2400, int(width) if width else 1920)
-                h = min(6000, int(height) if height else 1080)
-                self.driver.set_window_size(w, h)
-                time.sleep(0.2)
-            except Exception:
-                pass
-
-            # save raw screenshot
-            self.driver.save_screenshot(str(path))
-            LOG.info("Saved screenshot: %s", path)
-
-            # try overlaying URL using Pillow
-            try:
-                from PIL import Image, ImageDraw, ImageFont
-                img = Image.open(path)
-                draw = ImageDraw.Draw(img)
-                try:
-                    url_text = self.driver.current_url or ""
-                except Exception:
-                    url_text = ""
-                bar_height = max(28, int(img.height * 0.04))
-                # draw top bar
-                draw.rectangle([(0, 0), (img.width, bar_height)], fill=(30, 30, 30))
-                # font (defensive)
-                try:
-                    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size=max(12, bar_height - 10))
-                except Exception:
-                    font = ImageFont.load_default()
-                # compute text height/width robustly
-                display_text = url_text if len(url_text) <= 140 else ("..." + url_text[-137:])
-                try:
-                    # Pillow >= 8: textbbox available
-                    bbox = draw.textbbox((0, 0), display_text, font=font)
-                    text_w = bbox[2] - bbox[0]
-                    text_h = bbox[3] - bbox[1]
-                except Exception:
-                    # fallback older method
-                    try:
-                        text_w, text_h = draw.textsize(display_text, font=font)
-                    except Exception:
-                        text_w, text_h = (0, bar_height - 6)
-                padding = 8
-                y = int((bar_height - text_h) / 2)
-                draw.text((padding, y), display_text, fill=(255, 255, 255), font=font)
-                # save overlay (overwrite)
-                img.save(path)
-                LOG.info("Saved screenshot with URL overlay: %s (url=%s)", path, url_text)
-            except Exception as e:
-                LOG.warning("URL overlay failed (Pillow missing or error): %s", e)
-        except Exception as e:
-            LOG.warning("Screenshot failed: %s", e)
-
-    def _save_cookies(self):
-        if not self.driver:
-            return
-        try:
-            with open(self.cookie_file, 'wb') as f:
-                pickle.dump(self.driver.get_cookies(), f)
-            LOG.info("Saved selenium cookies to %s", self.cookie_file)
-        except Exception as e:
-            LOG.error("Failed to save cookies: %s", e, exc_info=True)
-
-    def _load_cookies_to_selenium(self):
-        if not self.driver or not self.cookie_file.exists():
-            LOG.debug("No cookies available for selenium load")
-            return False
-        try:
-            with open(self.cookie_file, 'rb') as f:
-                cookies = pickle.load(f)
-            # Navigate to base domain before adding cookies
-            self.driver.get(self.base_url)
-            for c in cookies:
-                try:
-                    c.pop('sameSite', None)
-                    if 'expiry' in c and isinstance(c['expiry'], float):
-                        c['expiry'] = int(c['expiry'])
-                    if 'domain' in c and c['domain'].startswith('.'):
-                        c['domain'] = c['domain'].lstrip('.')
-                    self.driver.add_cookie(c)
-                except Exception:
-                    LOG.debug("Skipping invalid cookie: %s", c)
-            LOG.info("Loaded cookies into selenium")
-            return True
-        except Exception as e:
-            LOG.error("Failed to load cookies for selenium: %s", e, exc_info=True)
-            return False
 
     def _load_cookies_into_requests(self):
         s = requests.Session()
@@ -665,525 +652,1002 @@ class GoodreadsScraper:
             with open(self.cookie_file, 'rb') as f:
                 cookies = pickle.load(f)
             for c in cookies:
-                domain = c.get('domain', '.goodreads.com')
                 name = c.get('name')
                 value = c.get('value')
+                domain = c.get('domain', '.goodreads.com')
                 path = c.get('path', '/')
                 if name and value:
                     s.cookies.set(name, value, domain=domain, path=path)
-            LOG.info("Loaded cookies into requests session")
-        except Exception as e:
-            LOG.warning("Failed to load cookies into requests: %s", e)
+            LOG.debug("Loaded cookies into requests session")
+        except Exception:
+            LOG.exception("Failed to load cookies into requests session")
         return s
 
-    def _cookies_indicate_logged_in(self, cookies):
-        for c in cookies:
-            name = c.get('name') if isinstance(c, dict) else None
-            if not name:
+    def _save_cookies_from_selenium(self):
+        if not self.driver:
+            return
+        try:
+            cookies = self.driver.get_cookies()
+            with open(self.cookie_file, 'wb') as f:
+                pickle.dump(cookies, f)
+            LOG.debug("Saved selenium cookies")
+        except Exception:
+            LOG.exception("Failed to save selenium cookies")
+
+    def _cookies_indicate_logged_in(self, cookies_list):
+        for c in cookies_list:
+            n = c.get('name')
+            if not n:
                 continue
-            if any(sn in name.lower() for sn in LIKELY_SESSION_COOKIE_NAMES):
+            if any(k in n.lower() for k in LIKELY_SESSION_COOKIE_NAMES):
                 return True
         return False
 
-    def _verify_logged_in_selenium(self):
-        """
-        Return True if any positive login indicator is present:
-         - session cookie names
-         - profile / signout selectors
-         - 'My Books' link
-         - absence of sign-in inputs/buttons
-        """
-        driver = self.driver
-        try:
-            # cookie check
-            try:
-                cookies = driver.get_cookies()
-                if cookies and self._cookies_indicate_logged_in(cookies):
-                    LOG.debug("Detected session cookie(s) after login flow")
-                    return True
-            except Exception:
-                LOG.debug("Couldn't read cookies in verify step")
-
-            selectors = [
-                "a[href*='/user/sign_out']",
-                "a[href*='/logout']",
-                "a[href*='/user/show/']",
-                "img.gravatar",
-                "button[aria-label='Account menu']"
-            ]
-            for s in selectors:
-                try:
-                    el = driver.find_elements(By.CSS_SELECTOR, s)
-                    if el and len(el) > 0:
-                        LOG.debug("Found logged-in indicator element selector: %s", s)
-                        return True
-                except Exception:
-                    continue
-
-            # 'My Books' check
-            try:
-                if driver.find_elements(By.XPATH, "//a[contains(., 'My Books') or contains(., 'My books')]"):
-                    LOG.debug("Found 'My Books' link (likely logged-in)")
-                    return True
-            except Exception:
-                pass
-
-            # absence of sign-in inputs/buttons
-            signin_inputs = []
-            try:
-                signin_inputs = (
-                    driver.find_elements(By.ID, "ap_email")
-                    + driver.find_elements(By.NAME, "user[email]")
-                    + driver.find_elements(By.XPATH, "//button[contains(., 'Sign in') or contains(., 'Sign-In')]")
-                )
-            except Exception:
-                signin_inputs = []
-            if not signin_inputs:
-                LOG.debug("No sign-in inputs/buttons found on page; assume logged in")
-                return True
-
-        except Exception as e:
-            LOG.debug("verify_logged_in_selenium encountered an error: %s", e, exc_info=True)
-        return False
-
-    def _wait_for_login_success(self, timeout=30, poll=0.5):
-        start = time.time()
-        while time.time() - start < timeout:
-            try:
-                if self._verify_logged_in_selenium():
-                    LOG.info("Login verified by _wait_for_login_success")
-                    return True
-            except Exception:
-                LOG.debug("Exception while checking login status", exc_info=True)
-            time.sleep(poll)
-        LOG.debug("Timed out waiting for login success")
-        return False
-
-    def login(self):
-        if self.logged_in:
-            LOG.info("Already logged in")
-            return True
-
-        driver = self._init_driver()
-        if not driver:
-            LOG.warning("Selenium not available; will attempt requests fallback using cookies.")
+    def login_selenium_with_cookies(self):
+        drv = self._init_driver()
+        if not drv:
             return False
-
-        # Try cookie restore
         try:
-            driver.get(self.base_url)
+            drv.get(self.base_url)
             if self.cookie_file.exists():
-                LOG.info("Attempting cookie-based login for selenium")
-                self._load_cookies_to_selenium()
-                driver.refresh()
-                time.sleep(1)
-                if self._verify_logged_in_selenium():
-                    LOG.info("Logged in using saved cookies (selenium)")
-                    self.logged_in = True
-                    return True
-                else:
-                    LOG.info("Saved cookies are invalid. Proceeding with full login.")
-        except Exception as e:
-            LOG.warning("Cookie-based login attempt failed: %s", e, exc_info=True)
-
-        # Full login flow
-        tries = 3
-        for attempt in range(1, tries + 1):
-            try:
-                LOG.info("Navigating to Goodreads sign-in page.")
-                driver.get(f"{self.base_url}/user/sign_in")
-                self._take_screenshot("signin_portal_page")
-
-                # Click sign-in button if present (Best-effort)
-                try:
-                    btn = WebDriverWait(driver, 6).until(
-                        EC.element_to_be_clickable((By.XPATH, "//button[contains(normalize-space(.),'Sign in with email') or contains(normalize-space(.),'Sign in with Amazon') or contains(normalize-space(.),'Sign in')]"))
-                    )
+                with open(self.cookie_file, 'rb') as f:
+                    cookies = pickle.load(f)
+                for c in cookies:
                     try:
-                        btn.click()
-                        LOG.info("Clicked 'Sign in with email' button.")
-                        time.sleep(0.8)
-                    except Exception:
-                        LOG.debug("Couldn't click sign-in button (will continue).")
-                except TimeoutException:
-                    LOG.debug("'Sign in with email' button not found, continue to locate inputs")
-
-                # find credentials fields
-                email_el = None
-                password_el = None
-                try:
-                    email_el = WebDriverWait(driver, 8).until(
-                        EC.presence_of_element_located((By.ID, "ap_email"))
-                    )
-                    password_el = driver.find_element(By.ID, "ap_password")
-                    LOG.debug("Found Amazon ap_email/ap_password fields")
-                except TimeoutException:
-                    try:
-                        email_el = WebDriverWait(driver, 6).until(
-                            EC.presence_of_element_located((By.NAME, "user[email]"))
-                        )
-                        password_el = driver.find_element(By.NAME, "user[password]")
-                        LOG.debug("Found Goodreads native fields")
-                    except TimeoutException:
-                        email_el = None
-                        password_el = None
-
-                if not email_el or not password_el:
-                    self._take_screenshot(f"error_login_attempt_{attempt}", force=True)
-                    raise Exception("Login form fields could not be located")
-
-                # try "Keep me signed in"
-                try:
-                    for sel in [
-                        (By.ID, "rememberMe"),
-                        (By.NAME, "rememberMe"),
-                        (By.XPATH, "//input[@type='checkbox' and (contains(@id,'remember') or contains(@name,'remember'))]"),
-                        (By.XPATH, "//label[contains(., 'Keep me signed in')]/preceding-sibling::input[@type='checkbox']"),
-                        (By.XPATH, "//span[contains(., 'Keep me signed in')]/preceding::input[1][@type='checkbox']")
-                    ]:
-                        try:
-                            cb = driver.find_element(*sel)
-                            if cb and not cb.is_selected():
-                                cb.click()
-                                LOG.info("Checked 'Keep me signed in' checkbox using selector %s", sel)
-                                break
-                        except Exception:
-                            continue
-                except Exception:
-                    LOG.debug("Could not check 'Keep me signed in'")
-
-                # enter credentials and submit
-                LOG.info("Entering credentials (masked).")
-                email_el.clear()
-                email_el.send_keys(self.goodreads_email)
-                password_el.clear()
-                password_el.send_keys(self.goodreads_password)
-
-                submitted = False
-                for submit_selector in [
-                    (By.ID, "signInSubmit"),
-                    (By.XPATH, "//input[@type='submit' and (contains(@value,'Sign') or contains(@value,'sign'))]"),
-                    (By.XPATH, "//button[contains(., 'Sign in') or contains(., 'Sign-In')]")
-                ]:
-                    try:
-                        btn = driver.find_element(*submit_selector)
-                        btn.click()
-                        submitted = True
-                        LOG.debug("Clicked submit: %s", submit_selector)
-                        break
+                        c.pop('sameSite', None)
+                        if 'expiry' in c and isinstance(c['expiry'], float):
+                            c['expiry'] = int(c['expiry'])
+                        if 'domain' in c and c['domain'].startswith('.'):
+                            c['domain'] = c['domain'].lstrip('.')
+                        drv.add_cookie(c)
                     except Exception:
                         continue
-
-                if not submitted:
-                    from selenium.webdriver.common.keys import Keys
-                    try:
-                        password_el.send_keys(Keys.RETURN)
-                        LOG.debug("Submitted via Enter key")
-                    except Exception:
-                        pass
-
-                success = self._wait_for_login_success(timeout=30)
-                if success:
-                    self._take_screenshot("login_success")
-                    self._save_cookies()
-                    self.logged_in = True
-                    LOG.info("Successfully logged in (selenium)")
-                    return True
-                else:
-                    self._take_screenshot(f"error_login_attempt_{attempt}", force=True)
-                    raise Exception("Timed out waiting for login success indicators")
-
-            except Exception as exc:
-                LOG.warning("Login attempt %d failed: %s", attempt, exc, exc_info=True)
-                time.sleep(2 + attempt * 2)
-                if attempt == tries:
-                    LOG.error("Exhausted login attempts")
-                    break
-                continue
-
-        self._close_driver()
+                drv.refresh()
+                time.sleep(1)
+                try:
+                    if self._cookies_indicate_logged_in(drv.get_cookies()):
+                        LOG.info("Logged in via cookies (selenium)")
+                        return True
+                except Exception:
+                    pass
+        except Exception:
+            LOG.exception("Cookie-based selenium login failed")
         return False
 
-    def _fetch_shelf_with_requests(self, shelf_name):
-        session = self._load_cookies_into_requests()
-        shelf_url = f"{self.base_url}/review/list/{self.user_id}?shelf={shelf_name}"
-        try:
-            r = session.get(shelf_url, timeout=20)
-            if r.status_code == 200 and "Sign in" not in r.text:
-                LOG.info("Fetched shelf via requests fallback")
-                return r.text
-            LOG.warning("Requests fallback couldn't fetch shelf (status=%s)", r.status_code)
-            return None
-        except Exception as e:
-            LOG.error("Requests fetch failed: %s", e, exc_info=True)
-            return None
-
-    def get_goodreads_books_from_shelf(self, shelf_name):
-        LOG.info("Fetching books from Goodreads '%s' shelf for user_id=%s...", shelf_name, self.user_id)
-        page_source = None
-
-        # Selenium path
-        if self._selenium_available:
-            try:
-                ok = self.login()
-            except Exception as e:
-                LOG.warning("Selenium login error: %s", e, exc_info=True)
-                ok = False
-
-            if ok and self.driver:
-                try:
-                    shelf_url = f"{self.base_url}/review/list/{self.user_id}?shelf={shelf_name}"
-                    LOG.debug("Navigating selenium to: %s", shelf_url)
-                    self.driver.get(shelf_url)
-
-                    # Wait for the shelf table rows to appear (robust)
-                    try:
-                        WebDriverWait(self.driver, 20).until(
-                            lambda d: d.find_elements(By.CSS_SELECTOR, "tbody#booksBody tr, tr.bookalike, table#books tr, td.field.title a")
-                        )
-                    except TimeoutException:
-                        LOG.debug("Timeout while waiting for shelf table - will continue to parse whatever is available")
-
-                    self._take_screenshot(f"fetch_shelf_{shelf_name}")
-                    page_source = self.driver.page_source
-                except Exception as e:
-                    LOG.error("Selenium fetch of shelf failed: %s", e, exc_info=True)
-                    self._take_screenshot("fetch_shelf_error", force=True)
-                    page_source = None
-            else:
-                page_source = None
-
-        # Requests fallback
-        if not page_source:
-            LOG.info("Attempting requests fallback to fetch shelf")
-            page_source = self._fetch_shelf_with_requests(shelf_name)
-
-        if not page_source:
-            LOG.error("Unable to fetch shelf page via selenium or requests fallback")
-            return []
-
-        # Save raw HTML for debugging
-        try:
-            fname = self.cache_dir / f"shelf_{shelf_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
-            fname.write_text(page_source, encoding='utf-8')
-            LOG.debug("Saved shelf HTML to %s", fname)
-        except Exception:
-            pass
-
-        soup = BeautifulSoup(page_source, 'html.parser')
-        books = []
-
-        # Robust row selection - try several strongly-typed selectors in order
-        candidate_rows = []
-        selectors_tried = []
-        try:
-            # prefer explicit tbody id
-            selectors_tried.append("tbody#booksBody tr")
-            candidate_rows = soup.select("tbody#booksBody tr")
-            if not candidate_rows:
-                selectors_tried.append("tr.bookalike")
-                candidate_rows = soup.select("tr.bookalike")
-            if not candidate_rows:
-                selectors_tried.append("table#books tr")
-                candidate_rows = soup.select("table#books tr")
-            if not candidate_rows:
-                selectors_tried.append("table.table tr")
-                candidate_rows = soup.select("table.table tr")
-            if not candidate_rows:
-                selectors_tried.append("td.field.title a")
-                # fallback: find title anchors directly
-                title_anchors = soup.select("td.field.title a, a.bookTitle, a.title")
-                # map anchors back to rows
-                for a in title_anchors:
-                    tr = a.find_parent("tr")
-                    if tr is not None:
-                        candidate_rows.append(tr)
-            LOG.debug("Selectors tried: %s ; candidate rows found: %d", selectors_tried, len(candidate_rows))
-        except Exception:
-            LOG.debug("Error when selecting candidate rows", exc_info=True)
-
-        for row in candidate_rows:
-            try:
-                # Title and author live in td.field.title and td.field.author (per your HTML)
-                title_elem = row.select_one('td.field.title a') or row.select_one('a.bookTitle') or row.select_one('a.title')
-                author_elem = row.select_one('td.field.author a') or row.select_one('a.authorName') or row.select_one('.authorName')
-                if not (title_elem and author_elem):
-                    # some row formats may wrap differently; try finding anchors anywhere in row
-                    title_elem = row.find('a', href=True, title=True) or title_elem
-                    author_elem = row.find('a', href=True, text=True) or author_elem
-                if not (title_elem and author_elem):
-                    LOG.debug("Skipping row because title or author missing")
-                    continue
-
-                title = title_elem.get_text(strip=True)
-                author = author_elem.get_text(strip=True)
-                book_url = title_elem.get('href')
-                goodreads_id = None
-                if book_url:
-                    parts = [p for p in book_url.split('/') if p]
-                    for p in reversed(parts):
-                        if p.isdigit():
-                            goodreads_id = p
-                            break
-                # if still no numeric id, try data attributes or review id in tr id: e.g. id="review_7903565710"
-                if not goodreads_id:
-                    # check for data-resource-id or similar attributes on row or cover anchor
-                    for attr in ('data-resource-id', 'data-book-id'):
-                        if row.has_attr(attr):
-                            goodreads_id = row[attr]
-                            break
-                    if not goodreads_id and row.has_attr('id'):
-                        # extract digits
-                        import re
-                        m = re.search(r'(\d{6,})', row['id'])
-                        if m:
-                            goodreads_id = m.group(1)
-
-                if not goodreads_id:
-                    LOG.debug("Skipping book with no ID: %s", title)
-                    continue
-
-                books.append({
-                    'goodreads_id': goodreads_id,
-                    'title': title,
-                    'author': author,
-                    'book_url': urljoin(self.base_url, book_url) if book_url else None
-                })
-            except Exception:
-                LOG.debug("Skipping malformed row", exc_info=True)
-                continue
-
-        LOG.info("Found %d books on shelf %s", len(books), shelf_name)
-        try:
-            self._close_driver()
-        except Exception:
-            pass
-        return books
-
-    def update_history(self, entry):
-        history_path = Path(self.config.get('history_file', '/app/logs/history.json'))
-        entry['timestamp'] = datetime.now().isoformat()
-        try:
-            history = []
-            if history_path.exists() and history_path.stat().st_size > 0:
-                history = json.loads(history_path.read_text())
-            history.append(entry)
-            history_path.write_text(json.dumps(history, indent=2))
-        except Exception:
-            LOG.warning("Failed to update history file", exc_info=True)
-
-    def sync(self):
-        books = self.get_goodreads_books_from_shelf(self.shelf_name)
-        if not books:
-            LOG.warning("No books found, skipping sync")
+    def ensure_all_columns_visible(self):
+        """If the shelf settings control is present, click it, enable all checkboxes, set per_page to configured value and save."""
+        if not self.driver:
             return
-        for b in books:
-            d = {'goodreads_id': b['goodreads_id'], 'title': b['title'], 'author': b['author']}
-            self.db.save_book(d)
-            self.update_history({'action': 'fetch_shelf', 'book_id': d['goodreads_id'], 'title': d['title'], 'status': 'success'})
-            query = f"{d['title']} {d['author']}"
-            results = self.cwa_client.search_book(query)
-            if not results or not results.get('results'):
-                self.update_history({'action':'search','book_id':d['goodreads_id'],'title':d['title'],'status':'no_results'})
+        try:
+            # Click the settings link if present
+            try:
+                link = self.driver.find_element(By.ID, "shelfSettingsLink")
+                try:
+                    link.click()
+                    time.sleep(0.6)
+                except Exception:
+                    self.driver.execute_script("arguments[0].click();", link)
+                    time.sleep(0.6)
+            except Exception:
+                # settings link not present - ignore
+                pass
+
+            # now in settings, check all checkboxes inside #shelfSettings
+            try:
+                settings = self.driver.find_element(By.ID, "shelfSettings")
+                # check all input[type=checkbox] within settings
+                checkboxes = settings.find_elements(By.CSS_SELECTOR, "input[type=checkbox]")
+                for cb in checkboxes:
+                    try:
+                        if not cb.is_selected():
+                            self.driver.execute_script("arguments[0].click();", cb)
+                    except Exception:
+                        continue
+                # set per_page select to self.per_page if present
+                try:
+                    sel = settings.find_element(By.ID, "user_shelf_per_page")
+                    # set via JS
+                    self.driver.execute_script(f"arguments[0].value = '{self.per_page}'; arguments[0].dispatchEvent(new Event('change'))", sel)
+                except Exception:
+                    pass
+
+                # click Save if present
+                try:
+                    save_btn = settings.find_element(By.CSS_SELECTOR, "input[type=submit][id='save_curr_sett_submit']")
+                    if save_btn:
+                        self.driver.execute_script("arguments[0].click()", save_btn)
+                        time.sleep(0.8)
+                except Exception:
+                    # maybe no save button
+                    pass
+            except Exception:
+                # no settings element
+                pass
+        except Exception:
+            LOG.exception("Failed to ensure all columns visible")
+
+    def _download_cover(self, url, goodreads_id):
+        """Download cover image and return local path or None."""
+        if not url:
+            return None
+        try:
+            parsed = urlparse(url)
+            ext = Path(parsed.path).suffix or ".jpg"
+            fname = f"{goodreads_id}{ext}"
+            local = self.cover_cache / fname
+            if local.exists():
+                return str(local.name)
+            resp = requests.get(url, timeout=20, stream=True)
+            if resp.status_code == 200:
+                with open(local, "wb") as f:
+                    for chunk in resp.iter_content(1024 * 8):
+                        f.write(chunk)
+                return str(local.name)
+        except Exception:
+            LOG.exception("Failed to download cover: %s", url)
+        return None
+
+    def _parse_series_from_title(self, title):
+        """
+        Try to parse series info from title text.
+        Returns (title_clean, series_name, series_number, series_id)
+        """
+        if not title:
+            return title, None, None, None
+        t = title.strip()
+        series_name = None
+        series_number = None
+        series_id = None
+
+        # find parentheses content at end
+        m = re.search(r'\(([^()]+)\)\s*$', t)
+        if m:
+            inside = m.group(1)
+            mnum = re.search(r'#\s*([\d\.]+)', inside)
+            if mnum:
+                series_number = mnum.group(1)
+            cleaned = re.sub(r',?\s*#\s*[\d\.]+', '', inside).strip()
+            series_name = cleaned if cleaned else None
+            title_clean = re.sub(r'\s*\([^()]*\)\s*$', '', t).strip()
+            return title_clean, series_name, series_number, None
+
+        m2 = re.search(r'(.*?)\s+[-–/]\s*(.+?#\s*[\d\.]+)\s*$', t)
+        if m2:
+            title_clean = m2.group(1).strip()
+            inside = m2.group(2)
+            mnum = re.search(r'#\s*([\d\.]+)', inside)
+            if mnum:
+                series_number = mnum.group(1)
+            series_name = re.sub(r',?\s*#\s*[\d\.]+', '', inside).strip()
+            return title_clean, series_name, series_number, None
+
+        return t, None, None, None
+
+    def _normalize_author_first(self, author_text):
+        """
+        Normalize author into 'First Last' form.
+        Examples:
+           "Eatough, Nicole" -> "Nicole Eatough"
+        """
+        if not author_text:
+            return None
+        a = author_text.strip()
+        if ',' in a:
+            parts = [p.strip() for p in a.split(',') if p.strip()]
+            if len(parts) >= 2:
+                return " ".join(parts[::-1])
+        return a
+
+    def _map_row_by_headers(self, headers, row):
+        """
+        headers: list of header keys (in order)
+        row: BeautifulSoup tr element
+        Return dict mapping keys to extracted cell values
+        """
+        cells = row.find_all(['td', 'th'])
+        data = {}
+        for idx, h in enumerate(headers):
+            key = h or f'col{idx}'
+            val = None
+            if idx < len(cells):
+                cell = cells[idx]
+                a = cell.find('a')
+                if a and a.get('href') and (key in ('title', 'cover', 'author') or a.get_text(strip=True)):
+                    if key == 'title':
+                        val = a.get_text(" ", strip=True)
+                        href = a.get('href')
+                        data['book_url'] = urljoin(self.base_url, href) if href else None
+                    elif key == 'author':
+                        val = a.get_text(" ", strip=True)
+                    elif key == 'cover':
+                        img = cell.find('img')
+                        if img and img.get('src'):
+                            val = img.get('src')
+                        else:
+                            val = a.get_text(" ", strip=True)
+                    else:
+                        val = a.get_text(" ", strip=True)
+                else:
+                    val = cell.get_text(" ", strip=True)
+                    if key == 'cover':
+                        img = cell.find('img')
+                        if img and img.get('src'):
+                            val = img.get('src')
+                if val:
+                    if key in ('position', 'num_pages', 'num_ratings', 'comments', 'votes', 'read_count'):
+                        m = re.search(r'(\d+)', val.replace(',', ''))
+                        if m:
+                            try:
+                                val = int(m.group(1))
+                            except:
+                                pass
+                    if key in ('avg_rating',):
+                        m = re.search(r'([0-9]+(\.[0-9]+)?)', val)
+                        if m:
+                            try:
+                                val = float(m.group(1))
+                            except:
+                                pass
+            data[key] = val
+        return data
+
+    def get_goodreads_books_from_shelf(self, shelf_name='to-download', fetch_details=False, max_pages=50):
+        """
+        Fetch books using the 'ALL' shelf view with pagination using per_page configured.
+        Returns list of book dicts.
+        """
+        LOG.info("Fetching books from Goodreads shelf='%s' user=%s per_page=%d", shelf_name, self.user_id, self.per_page)
+
+        if not self.user_id:
+            raise ValueError("goodreads_user_id not set in config")
+
+        collected = []
+        page_index = 1
+
+        # Try Selenium first, better at toggling settings
+        drv = None
+        if self._selenium_available:
+            drv = self._init_driver()
+        if drv:
+            try:
+                try:
+                    self.login_selenium_with_cookies()
+                except Exception:
+                    pass
+
+                base_shelf = f"{self.base_url}/review/list/{self.user_id}?utf8=✓&shelf=%23ALL%23&per_page={self.per_page}"
+                while page_index <= max_pages:
+                    url = f"{base_shelf}&page={page_index}"
+                    LOG.info("Selenium navigating to shelf page %s", url)
+                    drv.get(url)
+                    time.sleep(1.0)
+                    self.ensure_all_columns_visible()
+                    try:
+                        WebDriverWait(drv, 6).until(
+                            lambda d: d.find_elements(By.CSS_SELECTOR, "tbody#booksBody tr, tr.bookalike, table#books tr")
+                        )
+                    except Exception:
+                        LOG.debug("Timed out waiting for shelf table; parsing whatever is present")
+                    html = drv.page_source
+                    page_books, has_next = self._parse_shelf_html_and_save(html, shelf_name, fetch_details)
+                    collected.extend(page_books)
+                    LOG.info("Page %d: collected %d books (cumulative %d)", page_index, len(page_books), len(collected))
+                    if not has_next:
+                        break
+                    page_index += 1
+            except Exception:
+                LOG.exception("Selenium shelf fetch failed; falling back to requests")
+            finally:
+                try:
+                    self._save_cookies_from_selenium()
+                finally:
+                    self._close_driver()
+
+        # If Selenium not available or returned nothing, fallback to requests
+        if not collected:
+            try:
+                session = self._load_cookies_into_requests()
+                base_shelf = f"{self.base_url}/review/list/{self.user_id}"
+                params = {'utf8': '✓', 'shelf': '#ALL#', 'per_page': str(self.per_page)}
+                page_index = 1
+                while page_index <= max_pages:
+                    params['page'] = str(page_index)
+                    full = f"{base_shelf}?{urlencode(params)}"
+                    LOG.info("Requests fetching %s", full)
+                    r = session.get(full, timeout=30)
+                    if r.status_code != 200:
+                        LOG.warning("Requests fetch returned %s", r.status_code)
+                        break
+                    page_books, has_next = self._parse_shelf_html_and_save(r.text, shelf_name, fetch_details)
+                    collected.extend(page_books)
+                    LOG.info("Page %d: collected %d books (cumulative %d)", page_index, len(page_books), len(collected))
+                    if not has_next:
+                        break
+                    page_index += 1
+            except Exception:
+                LOG.exception("Requests shelf fetch failed")
+
+        LOG.info("Total books collected from shelf view: %d", len(collected))
+        return collected
+
+    def _parse_shelf_html_and_save(self, html, shelf_name, fetch_details=False):
+        """
+        Parse HTML of a shelf page and store rows into DB.
+        Returns (books_list, has_next_page)
+        """
+        soup = BeautifulSoup(html, 'html.parser')
+        # detect pagination next link
+        has_next = False
+        try:
+            next_link = soup.select_one('a.next_page')
+            if next_link and ('disabled' not in (next_link.get('class') or [])):
+                has_next = True
+            # Goodreads sometimes uses rel=next anchor
+            if not has_next:
+                rel_next = soup.find('a', rel='next')
+                if rel_next:
+                    has_next = True
+        except Exception:
+            has_next = False
+
+        # detect headers in table#books
+        headers = []
+        header_row = soup.select_one('table#books thead tr') or soup.select_one('thead tr')
+        if header_row:
+            for th in header_row.find_all('th'):
+                alt = th.get('alt') or th.get('data-field') or (th.get('class') and " ".join(th.get('class'))) or th.get_text(" ", strip=True)
+                raw = (alt or '').strip().lower()
+                if 'title' in raw:
+                    headers.append('title')
+                elif 'author' in raw:
+                    headers.append('author')
+                elif 'cover' in raw:
+                    headers.append('cover')
+                elif 'isbn13' in raw:
+                    headers.append('isbn13')
+                elif 'isbn' in raw:
+                    headers.append('isbn')
+                elif 'asin' in raw:
+                    headers.append('asin')
+                elif 'avg' in raw and 'rating' in raw:
+                    headers.append('avg_rating')
+                elif 'num_ratings' in raw or 'num ratings' in raw:
+                    headers.append('num_ratings')
+                elif 'date_pub' in raw or 'date pub' in raw:
+                    headers.append('date_pub')
+                elif 'date_pub_edition' in raw or 'edition' in raw:
+                    headers.append('date_pub_edition')
+                elif 'num_pages' in raw or 'num pages' in raw:
+                    headers.append('num_pages')
+                elif raw.strip() in ('rating','my rating'):
+                    headers.append('rating')
+                elif 'shelf' in raw or 'shelves' in raw:
+                    headers.append('shelves')
+                elif 'date_added' in raw or 'added' in raw:
+                    headers.append('date_added')
+                elif 'date_read' in raw:
+                    headers.append('date_read')
+                elif 'date_started' in raw:
+                    headers.append('date_started')
+                elif 'review' in raw:
+                    headers.append('review')
+                elif 'notes' in raw:
+                    headers.append('notes')
+                elif 'comments' in raw:
+                    headers.append('comments')
+                elif 'votes' in raw:
+                    headers.append('votes')
+                elif 'position' in raw:
+                    headers.append('position')
+                elif 'owned' in raw:
+                    headers.append('owned')
+                elif 'format' in raw:
+                    headers.append('format')
+                elif 'actions' in raw:
+                    headers.append('actions')
+                elif 'recommender' in raw:
+                    headers.append('recommender')
+                elif 'read_count' in raw or 'read count' in raw:
+                    headers.append('read_count')
+                else:
+                    token = re.sub(r'\W+', '_', raw).strip('_')
+                    headers.append(token or 'col')
+        else:
+            # fallback guess
+            headers = ['position','cover','title','author','isbn','avg_rating','num_ratings','date_pub','rating','shelves','review','notes','comments','votes','date_read','date_added','format','actions']
+
+        books = []
+        rows = soup.select('tbody#booksBody tr') or soup.select('tr.bookalike') or []
+        for row in rows:
+            try:
+                mapped = self._map_row_by_headers(headers, row)
+                # find goodreads id
+                gid = None
+                if mapped.get('book_url'):
+                    m = re.search(r'/book/show/(\d+)', mapped.get('book_url'))
+                    if m:
+                        gid = m.group(1)
+                    else:
+                        m2 = re.search(r'(\d{6,})', mapped.get('book_url'))
+                        if m2:
+                            gid = m2.group(1)
+                if not gid:
+                    if row.has_attr('id'):
+                        m3 = re.search(r'(\d{6,})', row['id'])
+                        if m3:
+                            gid = m3.group(1)
+                if not gid:
+                    for attr in ('data-resource-id','data-book-id','data-review-id'):
+                        if row.has_attr(attr):
+                            gid = row[attr]
+                            break
+                if not gid:
+                    LOG.debug("Skipping row without goodreads id (title=%s)", mapped.get('title'))
+                    continue
+
+                title_raw = mapped.get('title') or None
+                title_clean, series_name, series_number, series_id = self._parse_series_from_title(title_raw)
+                author = mapped.get('author') or None
+                author_first = self._normalize_author_first(author)
+
+                # cover handling
+                cover_url = mapped.get('cover') or None
+                cover_local = None
+                try:
+                    cover_local = self._download_cover(cover_url, gid) if cover_url else None
+                except Exception:
+                    cover_local = None
+
+                shelves_val = mapped.get('shelves')
+                if shelves_val:
+                    shelves = ", ".join([s.strip() for s in re.split(r'[,/]|\\|;', shelves_val) if s.strip()])
+                else:
+                    shelves = shelf_name
+
+                book = {
+                    'goodreads_id': str(gid),
+                    'title': title_raw,
+                    'title_clean': title_clean,
+                    'author': author,
+                    'author_first': author_first,
+                    'series_name': series_name,
+                    'series_number': series_number,
+                    'series_id': series_id,
+                    'position': mapped.get('position'),
+                    'cover_url': cover_url,
+                    'cover_local_path': cover_local,  # store filename or None
+                    'book_url': mapped.get('book_url'),
+                    'isbn': mapped.get('isbn'),
+                    'isbn13': mapped.get('isbn13'),
+                    'asin': mapped.get('asin'),
+                    'avg_rating': mapped.get('avg_rating'),
+                    'num_ratings': mapped.get('num_ratings'),
+                    'date_pub': mapped.get('date_pub'),
+                    'date_pub_edition': mapped.get('date_pub_edition'),
+                    'num_pages': mapped.get('num_pages'),
+                    'rating': mapped.get('rating'),
+                    'shelves': shelves,
+                    'review': mapped.get('review'),
+                    'notes': mapped.get('notes'),
+                    'comments': mapped.get('comments'),
+                    'votes': mapped.get('votes'),
+                    'date_read': mapped.get('date_read'),
+                    'date_started': mapped.get('date_started'),
+                    'date_added': mapped.get('date_added'),
+                    'date_purchased': mapped.get('date_purchased'),
+                    'purchase_location': mapped.get('purchase_location'),
+                    'owned': mapped.get('owned'),
+                    'condition': mapped.get('condition'),
+                    'format': mapped.get('format'),
+                    'recommender': mapped.get('recommender'),
+                    'read_count': mapped.get('read_count'),
+                    'genres': None,
+                    'fetched_at': datetime.utcnow().isoformat()
+                }
+
+                # Save to DB. Use db.save_book (should properly insert/update)
+                try:
+                    self.db.save_book(book, shelves=[shelf_name])
+                except Exception:
+                    LOG.exception("Failed to save book to DB: %s", gid)
+
+                # Add history (if DB supports)
+                try:
+                    self.db.add_history(action='fetch_shelf_row', book_id=gid, title=title_clean, status='fetched', meta={'shelf': shelf_name})
+                except Exception:
+                    # not fatal
+                    pass
+
+                books.append(book)
+            except Exception:
+                LOG.exception("Failed to parse/save row")
                 continue
-            if self.dry_run:
-                self.update_history({'action':'download','book_id':d['goodreads_id'],'title':d['title'],'status':'skipped_dry_run'})
-                continue
-            best = results['results'][0]
-            download_id = self.cwa_client.request_download(best['id'])
-            if not download_id:
-                continue
-            success = self.cwa_client.check_download_status(download_id)
-            self.update_history({'action':'download','book_id':d['goodreads_id'],'title':d['title'],'result_id':best['id'],'status':'success' if success else 'failure'})
+
+        return books, has_next
+
 EOF
 
 echo "Creating file: src/scrapers/__init__.py"
 cat << 'EOF' > "src/scrapers/__init__.py"
+
 EOF
 mkdir -p "src/webui"
 
 echo "Creating file: src/webui/app.py"
 cat << 'EOF' > "src/webui/app.py"
-from flask import Flask, render_template, jsonify, request
-from pathlib import Path
-import logging
-from datetime import datetime
+# src/webui/app.py
+import os
 import json
-from src.utils.config_loader import load_config
-from src.sync_logic import orchestrate_sync
-from src.scrapers.goodreads import GoodreadsScraper
+import logging
+import threading
+import time
+from functools import wraps
+from pathlib import Path
+from typing import Tuple, Union
 
-app = Flask(__name__)
+import difflib
+import requests
+from flask import Flask, request, jsonify, render_template, send_from_directory, redirect, url_for, current_app
+from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.wrappers import Response
+from werkzeug.security import check_password_hash
 
+# project imports (adjust if your import paths differ)
+try:
+    from src.utils.database import Database
+    from src.scrapers.goodreads import GoodreadsScraper
+except Exception:
+    from utils.database import Database
+    from scrapers.goodreads import GoodreadsScraper
+
+LOG = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-@app.template_filter('strftime')
-def _jinja2_filter_datetime(date_str, fmt='%Y-%m-%d %H:%M:%S'):
-    if not date_str:
-        return "N/A"
+app = Flask(__name__, static_folder='static', template_folder='templates')
+app.wsgi_app = ProxyFix(app.wsgi_app)
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+
+# load config from file if present
+CONFIG_PATH = os.getenv('APP_CONFIG_JSON', 'config.json')
+if os.path.exists(CONFIG_PATH):
     try:
-        if isinstance(date_str, str):
-            dt = datetime.fromisoformat(date_str)
-        elif isinstance(date_str, datetime):
-            dt = date_str
+        with open(CONFIG_PATH, 'r') as f:
+            cfg = json.load(f)
+            app.config.update(cfg)
+            LOG.info("Loaded config from %s", CONFIG_PATH)
+    except Exception:
+        LOG.exception("Failed to load config.json")
+else:
+    LOG.info("No config.json found at %s; using env vars", CONFIG_PATH)
+
+def get_config(key, default=None):
+    v = app.config.get(key)
+    if v is None:
+        v = os.getenv(key.upper(), default)
+    return v
+
+# Database init
+DB_PATH = get_config('database_path') or get_config('DATABASE_PATH') or '/app/data/databases/goodreads.db'
+db = Database(DB_PATH)
+
+# CWA backend config helper
+def _get_cwa_config() -> Tuple[Union[str,None], Union[str,None], Union[str,None]]:
+    base = app.config.get('cwa_api_url') or os.getenv('CWA_API_URL') or os.getenv('DOWNLOAD_BACKEND_URL') or app.config.get('download_backend_url')
+    username = app.config.get('cwa_username') or os.getenv('CWA_USERNAME')
+    password = app.config.get('cwa_password') or os.getenv('CWA_PASSWORD')
+    if base and base.endswith('/'):
+        base = base[:-1]
+    return base, username, password
+
+def _call_cwa_api(path: str, method: str = 'GET', params=None, json_body=None, timeout=12):
+    base, username, password = _get_cwa_config()
+    if not base:
+        return False, 500, "CWA backend not configured (cwa_api_url)"
+    url = f"{base}/{path.lstrip('/')}"
+    auth = (username, password) if username and password else None
+    try:
+        r = requests.request(method, url, params=params, json=json_body, auth=auth, timeout=timeout)
+    except requests.RequestException as e:
+        LOG.error("Backend HTTP call failed %s %s", url, e)
+        return False, 502, f"Backend unreachable: {repr(e)}"
+    try:
+        ct = r.headers.get('Content-Type','')
+        if 'application/json' in ct or (r.text and (r.text.strip().startswith('{') or r.text.strip().startswith('['))):
+            return True, r.status_code, r.json()
         else:
-            return date_str
-        return dt.strftime(fmt)
-    except (ValueError, TypeError):
-        return date_str
+            return True, r.status_code, r.text
+    except Exception:
+        return True, r.status_code, r.text
 
-@app.route('/')
-@app.route('/status')
-def status():
-    history_path = Path('/app/logs/history.json')
-    history = []
-    log_path = Path('/app/logs/sync_log.txt')
-    log_content = ""
-    if history_path.exists():
-        try:
-            with open(history_path, 'r') as f:
-                content = f.read()
-                if content:
-                    history = json.loads(content)
-                    history.reverse()
-        except json.JSONDecodeError:
-            logging.warning("History file is malformed or empty.")
-        except Exception as e:
-            logging.error(f"Error reading history file: {e}", exc_info=True)
+# Authentication - reuse CWA calibre-web DB if configured
+CWA_DB_PATH = get_config('CWA_DB_PATH') or get_config('cwa_db_path') or None
+def authenticate() -> bool:
+    if not CWA_DB_PATH:
+        return True
+    if not request.authorization:
+        return False
+    username = request.authorization.get('username')
+    password = request.authorization.get('password')
+    import sqlite3
     try:
-        if log_path.exists():
-            with open(log_path, 'r') as f:
-                lines = f.readlines()
-                log_content = "".join(lines[-50:])
-    except Exception as e:
-        logging.error(f"Error reading log file: {e}", exc_info=True)
-    return render_template('status.html', history=history, log_content=log_content, now=datetime.now())
+        db_uri = f"file:{CWA_DB_PATH}?mode=ro&immutable=1"
+        conn = sqlite3.connect(db_uri, uri=True)
+        cur = conn.cursor()
+        cur.execute("SELECT password FROM user WHERE name = ?", (username,))
+        row = cur.fetchone()
+        conn.close()
+        if not row or not row[0] or not check_password_hash(row[0], password):
+            LOG.warning("Auth failed for user %s", username)
+            return False
+    except Exception:
+        LOG.exception("Auth check failed")
+        return False
+    LOG.info("Authentication successful for %s", username)
+    return True
 
-@app.route('/history')
-def history():
-    return status()
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not authenticate():
+            return Response(response="Unauthorized", status=401, headers={"WWW-Authenticate": 'Basic realm="Login Required"'})
+        return f(*args, **kwargs)
+    return decorated
 
-@app.route('/sync', methods=['GET', 'POST'])
-def sync():
-    if request.method == 'POST':
-        try:
-            orchestrate_sync()
-            return jsonify({'status': 'success', 'message': 'Sync triggered successfully'})
-        except Exception as e:
-            logging.error(f"Sync failed: {e}", exc_info=True)
-            return jsonify({'status': 'error', 'message': str(e)}), 500
-    return render_template('sync.html')
+# Serve cover images saved by scraper
+@app.route('/covers/<path:filename>')
+@login_required
+def serve_cover(filename):
+    covers_dir = Path(get_config('cache_dir', '/app/data/cache')) / 'covers'
+    if not covers_dir.exists():
+        return "Not Found", 404
+    return send_from_directory(str(covers_dir), filename)
+
+# Basic pages (index, shelves, shelf view, downloads)
+@app.route('/')
+@login_required
+def index():
+    return redirect(url_for('shelf_view', shelf_name='to-download'))
+
+@app.route('/shelves')
+@login_required
+def shelves_page():
+    return render_template('shelves.html')
 
 @app.route('/shelf/<shelf_name>')
+@login_required
 def shelf_view(shelf_name):
-    config = load_config()
-    scraper = GoodreadsScraper(config)
-    books = scraper.get_goodreads_books_from_shelf(shelf_name)
-    sync_status = "Last sync: N/A"  # TODO: Pull from history or DB
-    return render_template('shelf_view.html', books=books, shelf_name=shelf_name, sync_status=sync_status)
+    try:
+        per_page = int(request.args.get('per_page', get_config('webui_per_page', 30)))
+    except Exception:
+        per_page = 30
+    try:
+        page = int(request.args.get('page', 1))
+    except Exception:
+        page = 1
+    offset = (page - 1) * per_page
 
-if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5002, debug=False)
+    try:
+        books = db.get_books_by_shelf(shelf_name, limit=per_page, offset=offset)
+    except TypeError:
+        LOG.warning("Database.get_books_by_shelf does not accept offset; calling without")
+        books = db.get_books_by_shelf(shelf_name, limit=per_page)
+
+    try:
+        total = db.count_books_by_shelf(shelf_name)
+    except Exception:
+        total = len(books)
+    total_pages = max(1, (int(total) + per_page - 1) // per_page)
+
+    return render_template('shelf_view.html',
+                           shelf_name=shelf_name,
+                           books=books,
+                           per_page=per_page,
+                           page=page,
+                           total_pages=total_pages,
+                           offset=offset,
+                           config=app.config)
+
+@app.route('/downloads')
+@login_required
+def downloads_page():
+    return render_template('downloads.html')
+
+@app.route('/status')
+@login_required
+def status_page():
+    return render_template('status.html')
+
+@app.route('/sync')
+@login_required
+def sync_page():
+    return render_template('sync.html')
+
+# Existing proxy endpoints (status, active, download, cancel)
+@app.route('/api/status_proxy', methods=['GET'])
+@login_required
+def api_status_proxy():
+    ok, code, body = _call_cwa_api('/api/status', 'GET')
+    if not ok:
+        return jsonify({"error": body}), 502
+    return jsonify(body), 200
+
+@app.route('/api/active_proxy', methods=['GET'])
+@login_required
+def api_active_proxy():
+    ok, code, body = _call_cwa_api('/api/downloads/active', 'GET')
+    if not ok:
+        return jsonify({"error": body}), 502
+    return jsonify(body), 200
+
+@app.route('/api/download_proxy', methods=['POST'])
+@login_required
+def api_download_proxy():
+    payload = request.get_json(silent=True) or request.values.to_dict()
+    if not payload:
+        return jsonify({"error": "No payload"}), 400
+    book_id = payload.get('id') or payload.get('book_id')
+    if not book_id:
+        return jsonify({"error": "No id provided"}), 400
+    priority = payload.get('priority', 0)
+    ok, code, body = _call_cwa_api('/api/download', 'GET', params={'id': book_id, 'priority': priority})
+    if not ok:
+        ok2, code2, body2 = _call_cwa_api('/api/download', 'POST', json_body={'id': book_id, 'priority': priority})
+        if not ok2:
+            return jsonify({"error": body2}), 502
+        return jsonify(body2), code2
+    return jsonify(body), code
+
+@app.route('/api/download/<book_id>/cancel_proxy', methods=['DELETE'])
+@login_required
+def api_cancel_download_proxy(book_id):
+    ok, code, body = _call_cwa_api(f'/api/download/{book_id}/cancel', 'DELETE')
+    if ok and 200 <= code < 300:
+        return jsonify(body if isinstance(body, dict) else {"status":"cancelled","book_id":book_id}), code
+    # try alternate path
+    ok2, code2, body2 = _call_cwa_api(f'/api/downloads/{book_id}/cancel', 'DELETE')
+    if ok2 and 200 <= code2 < 300:
+        return jsonify(body2), code2
+    return jsonify({"error":"Failed to cancel; backend unreachable or endpoint not supported"}), 502
+
+# Helper: string normalization
+def _normalize_str(s: str):
+    if not s:
+        return ''
+    s = s.lower()
+    s = re_clean = ''.join(ch for ch in s if ch.isalnum() or ch.isspace()).strip()
+    return re_clean
+
+# New: search+save endpoint + auto-queue best match
+@app.route('/api/search_and_queue', methods=['POST'])
+@login_required
+def api_search_and_queue():
+    """
+    Accepts JSON:
+      { goodreads_id, title, author, isbn, isbn13 }
+    Calls CWA backend /api/search (GET) with sensible params,
+    saves search request + response JSON to cache_dir/search_requests/,
+    scores candidates, auto-queues if confident, and returns JSON
+    { queued: true, candidate: {...} } or { candidates: [...] }.
+    """
+    payload = request.get_json(silent=True) or {}
+    if not payload:
+        return jsonify({"error":"No payload"}), 400
+
+    title = payload.get('title') or ''
+    author = payload.get('author') or ''
+    isbn = payload.get('isbn') or payload.get('isbn13') or ''
+    goodreads_id = str(payload.get('goodreads_id') or '')
+
+    # build query param - prefer isbn if present else "title author"
+    query = isbn if isbn else (title + ' ' + author).strip()
+    params = {'query': query}
+    if title:
+        params['title'] = title
+    if author:
+        params['author'] = author
+    if isbn:
+        params['isbn'] = isbn
+
+    ok, status_code, resp = _call_cwa_api('/api/search', 'GET', params=params)
+    timestamp = int(time.time())
+    cache_dir = Path(get_config('cache_dir', '/app/data/cache'))
+    search_dir = cache_dir / 'search_requests'
+    search_dir.mkdir(parents=True, exist_ok=True)
+    saved = {
+        'timestamp': timestamp,
+        'goodreads_id': goodreads_id,
+        'query': params,
+        'backend_response': resp if ok else {"error": resp}
+    }
+    fname = search_dir / f"{timestamp}_{goodreads_id or 'noid'}.json"
+    try:
+        with open(fname, 'w', encoding='utf-8') as f:
+            json.dump(saved, f, ensure_ascii=False, indent=2)
+    except Exception:
+        LOG.exception("Failed to save search request JSON")
+
+    if not ok:
+        return jsonify({"error": "Backend search failed", "detail": resp}), 502
+
+    # resp hopefully is list of candidates (books)
+    candidates = resp if isinstance(resp, list) else (resp.get('books') if isinstance(resp, dict) else None)
+    if not candidates:
+        # if response is non-list, try to return as-is
+        return jsonify({"error":"No candidates", "raw": resp}), 200
+
+    # score candidates
+    def score_candidate(cand):
+        # cand expected to have .title and .author and maybe isbn / id
+        s = 0
+        ct = cand.get('title') or cand.get('Title') or ''
+        ca = cand.get('author') or cand.get('Author') or ''
+        c_isbns = []
+        for k in ('isbn','isbn13','ISBN','ISBN13'):
+            v = cand.get(k)
+            if v:
+                if isinstance(v, list):
+                    c_isbns.extend(v)
+                else:
+                    c_isbns.append(str(v))
+        # ISBN exact match high boost
+        if isbn and any(isbn.replace('-', '') == c.replace('-', '') for c in c_isbns):
+            s += 2000
+        # exact title match
+        if title and ct and _normalize_str(title) == _normalize_str(ct):
+            s += 1000
+        # exact author contains
+        if author and ca and _normalize_str(author) in _normalize_str(ca):
+            s += 400
+        # fuzzy title ratio
+        try:
+            r = difflib.SequenceMatcher(None, _normalize_str(title), _normalize_str(ct)).ratio() if title and ct else 0.0
+            s += int(r * 300)
+        except Exception:
+            pass
+        # fuzzy author ratio
+        try:
+            r2 = difflib.SequenceMatcher(None, _normalize_str(author), _normalize_str(ca)).ratio() if author and ca else 0.0
+            s += int(r2 * 150)
+        except Exception:
+            pass
+        # slight preference for common ebook formats if present
+        fmt = (cand.get('format') or '').lower()
+        if fmt in ('epub','mobi','azw3','pdf'):
+            s += 20
+        return s
+
+    scored = []
+    for c in candidates:
+        try:
+            sc = score_candidate(c)
+            scored.append((sc, c))
+        except Exception:
+            LOG.exception("Scoring candidate failed")
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    # threshold to auto-queue
+    best_score, best_candidate = scored[0]
+    LOG.info("Top candidate score=%s for gr=%s", best_score, goodreads_id)
+    # Save scored candidate list for auditing
+    cand_dir = cache_dir / 'search_candidates'
+    cand_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(cand_dir / f"{timestamp}_{goodreads_id or 'noid'}.json", 'w', encoding='utf-8') as f:
+            json.dump({'scored': [{'score': s, 'candidate': c} for s, c in scored]}, f, ensure_ascii=False, indent=2)
+    except Exception:
+        LOG.exception("Failed to save candidates JSON")
+
+    # If confident (score big) auto queue
+    AUTO_THRESHOLD = app.config.get('auto_queue_score_threshold') or 600
+    if best_score >= int(AUTO_THRESHOLD):
+        # attempt to queue by calling download
+        cand_id = best_candidate.get('id') or best_candidate.get('md5') or best_candidate.get('ID') or best_candidate.get('Id')
+        if not cand_id:
+            return jsonify({"error":"No backend id for top candidate", "candidate": best_candidate}), 200
+        ok2, code2, body2 = _call_cwa_api('/api/download', 'GET', params={'id': cand_id, 'priority': 0})
+        if not ok2:
+            ok3, code3, body3 = _call_cwa_api('/api/download', 'POST', json_body={'id': cand_id, 'priority': 0})
+            if not ok3:
+                return jsonify({"error":"Failed to queue candidate", "detail": body3}), 502
+            queued_info = body3
+        else:
+            queued_info = body2
+        # save selection
+        sel_dir = cache_dir / 'selected_candidates'
+        sel_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(sel_dir / f"{timestamp}_{goodreads_id or 'noid'}.json", 'w', encoding='utf-8') as f:
+                json.dump({'selected': best_candidate, 'queued_result': queued_info}, f, ensure_ascii=False, indent=2)
+        except Exception:
+            LOG.exception("Failed to save selected candidate JSON")
+        return jsonify({"queued": True, "candidate": best_candidate, "queued_result": queued_info}), 200
+
+    # not confident: return top N candidates for manual selection
+    topN = [c for s, c in scored[:6]]
+    return jsonify({"queued": False, "candidates": topN, "reason": "low_confidence", "top_score": best_score}), 200
+
+
+@app.route('/search')
+@login_required
+def manual_search_page():
+    return render_template('search.html')
+
+@app.route('/api/manual_search', methods=['POST'])
+@login_required
+def api_manual_search():
+    payload = request.get_json(silent=True) or {}
+    query = payload.get('query')
+    if not query:
+        return jsonify({"error":"query required"}), 400
+
+    # throttle: avoid spamming backend
+    time.sleep(1.0)  # simple delay, could use token-bucket limiter
+
+    # retry up to 3 times
+    last_err = None
+    for attempt in range(3):
+        ok, code, resp = _call_cwa_api('/api/search', 'GET', params={'query': query})
+        if ok and code == 200:
+            candidates = resp if isinstance(resp, list) else resp.get('books', [])
+            return jsonify({"candidates": candidates})
+        last_err = resp
+        time.sleep(2**attempt)  # exponential backoff
+    return jsonify({"error":"backend search failed","detail":last_err}), 502
+
+
+
+# queue from candidate endpoint (manual choose)
+@app.route('/api/queue_from_candidate', methods=['POST'])
+@login_required
+def api_queue_from_candidate():
+    payload = request.get_json(silent=True) or {}
+    cand_id = payload.get('candidate_id') or payload.get('id')
+    if not cand_id:
+        return jsonify({"error":"candidate_id is required"}), 400
+    ok, code, body = _call_cwa_api('/api/download', 'GET', params={'id': cand_id, 'priority': payload.get('priority', 0)})
+    if not ok:
+        ok2, code2, body2 = _call_cwa_api('/api/download', 'POST', json_body={'id': cand_id, 'priority': payload.get('priority', 0)})
+        if not ok2:
+            return jsonify({"error": body2}), 502
+        return jsonify(body2), code2
+    return jsonify(body), code
+
+# spawn background sync (same as earlier)
+def _spawn_background_sync(shelf_name: str):
+    def run():
+        try:
+            cfg = app.config.copy()
+            cfg['cache_dir'] = cfg.get('cache_dir') or get_config('cache_dir', '/app/data/cache')
+            cfg['goodreads_per_page'] = cfg.get('goodreads_per_page') or get_config('goodreads_per_page', get_config('GOODREADS_PER_PAGE', 100))
+            gs = GoodreadsScraper(cfg)
+            gs.get_goodreads_books_from_shelf(shelf_name=shelf_name, fetch_details=False, max_pages=200)
+            LOG.info("Background sync finished for shelf %s", shelf_name)
+        except Exception:
+            LOG.exception("Background sync failed")
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t
+
+@app.route('/sync/<shelf_name>', methods=['POST'])
+@login_required
+def trigger_sync(shelf_name):
+    _spawn_background_sync(shelf_name)
+    return jsonify({"status":"sync_started", "shelf": shelf_name})
+
+# small endpoint to test backend reachability
+@app.route('/api/backend_info')
+@login_required
+def backend_info():
+    base, user, pw = _get_cwa_config()
+    ok, code, body = _call_cwa_api('/api/status', 'GET')
+    if not ok:
+        return jsonify({"ok": False, "error": body, "base": base}), 200
+    return jsonify({"ok": True, "backend_status": body, "base": base}), 200
+
+if __name__ == '__main__':
+    LOG.info("Starting webui on 0.0.0.0:5002")
+    app.run(host='0.0.0.0', port=int(os.getenv('WEBUI_PORT', 5002)), debug=False)
+
 EOF
 mkdir -p "src/webui/templates"
 
@@ -1192,207 +1656,421 @@ cat << 'EOF' > "src/webui/templates/layout.html"
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="refresh" content="60">
-    <title>{% block title %}Ebooks Manager{% endblock %}</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            margin: 0;
-            padding: 2rem;
-            background-color: #f4f7f6;
-            color: #333;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            background-color: #fff;
-            padding: 2rem;
-            border-radius: 8px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        }
-        h1, h2 {
-            color: #2c3e50;
-            border-bottom: 2px solid #e0e0e0;
-            padding-bottom: 0.5rem;
-        }
-        nav {
-            margin-bottom: 1rem;
-        }
-        nav a {
-            margin-right: 1rem;
-            text-decoration: none;
-            color: #2980b9;
-        }
-        nav a.active {
-            font-weight: bold;
-            color: #2c3e50;
-        }
-        table {
-            border-collapse: collapse;
-            width: 100%;
-            margin-top: 1rem;
-        }
-        th, td {
-            border: 1px solid #ddd;
-            padding: 12px;
-            text-align: left;
-            vertical-align: top;
-            word-break: break-word;
-        }
-        th {
-            background-color: #f8f8f8;
-            font-weight: bold;
-        }
-        tr:nth-child(even) {
-            background-color: #fdfdfd;
-        }
-        .status-success { color: #27ae60; font-weight: bold; }
-        .status-failure { color: #c0392b; font-weight: bold; }
-        .status-no_results { color: #f39c12; }
-        .status-found { color: #2980b9; }
-        pre {
-            background-color: #2c3e50;
-            color: #ecf0f1;
-            padding: 1rem;
-            border-radius: 4px;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            max-height: 400px;
-            overflow-y: auto;
-        }
-        .footer {
-            margin-top: 2rem;
-            text-align: center;
-            font-size: 0.9em;
-            color: #777;
-        }
-        code {
-            background: #eee;
-            padding: 2px 4px;
-            border-radius: 4px;
-        }
-    </style>
+  <meta charset="UTF-8">
+  <title>{% block title %}Goodreads WebUI{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 </head>
 <body>
-    <div class="container">
-        <h1>{% block header %}Ebooks Manager{% endblock %}</h1>
-        <nav>
-            <a href="{{ url_for('status') }}" class="{{ 'active' if request.endpoint in ['status', 'index'] else '' }}">Status</a>
-            <a href="{{ url_for('history') }}" class="{{ 'active' if request.endpoint == 'history' else '' }}">History</a>
-            <a href="{{ url_for('sync') }}" class="{{ 'active' if request.endpoint == 'sync' else '' }}">Sync</a>
-            <a href="{{ url_for('shelf_view', shelf_name='to-download') }}">To-Download Shelf</a>
-        </nav>
-        {% block content %}{% endblock %}
-        <div class="footer">
-            Ebooks Manager
-        </div>
-    </div>
+  <header>
+    <h1>📚 Goodreads Sync WebUI</h1>
+    <nav>
+      <a href="{{ url_for('shelf_view', shelf_name='to-download') }}">Shelves</a> |
+      <a href="{{ url_for('downloads_page') }}">Downloads</a> |
+      <a href="{{ url_for('manual_search_page') }}">Search</a> |
+      <a href="{{ url_for('sync_page') }}">Sync</a> |
+      <a href="{{ url_for('status_page') }}">Status</a>
+    </nav>
+    <hr>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <footer>
+    <hr>
+    <p style="font-size:0.9em;color:#666">Goodreads Sync &middot; WebUI</p>
+  </footer>
 </body>
 </html>
+
 EOF
 
 echo "Creating file: src/webui/templates/sync.html"
 cat << 'EOF' > "src/webui/templates/sync.html"
+{# templates/sync.html #}
 {% extends "layout.html" %}
-{% block title %}Manual Sync{% endblock %}
-{% block header %}Manual Sync{% endblock %}
+{% block title %}Sync{% endblock %}
 {% block content %}
-<p>Click to trigger sync:</p>
-<form method="POST">
-    <button type="submit">Run Sync Now</button>
-</form>
+  <h2>Manual Sync</h2>
+  <p>Trigger a bookshelf sync for a shelf:</p>
+  <form id="syncForm">
+    <label>Shelf name: <input name="shelf" value="to-download"></label>
+    <button class="btn" type="submit">Start Sync</button>
+  </form>
+  <div id="syncResult" class="small"></div>
+
+  <script>
+    document.getElementById('syncForm').addEventListener('submit', async (ev)=>{
+      ev.preventDefault();
+      const fd = new FormData(ev.target);
+      const shelf = fd.get('shelf');
+      document.getElementById('syncResult').innerText = 'Starting...';
+      const res = await fetch('/sync/' + encodeURIComponent(shelf), {method: 'POST'});
+      const j = await res.json();
+      document.getElementById('syncResult').innerText = JSON.stringify(j);
+    });
+  </script>
 {% endblock %}
+
+EOF
+
+echo "Creating file: src/webui/templates/shelves.html"
+cat << 'EOF' > "src/webui/templates/shelves.html"
+{# templates/shelves.html #}
+{% extends "layout.html" %}
+{% block title %}Shelves{% endblock %}
+{% block content %}
+  <h2>Shelves</h2>
+  <p>Quick links to common shelves:</p>
+  <ul>
+    <li><a href="{{ url_for('shelf_view', shelf_name='to-download') }}">to-download</a></li>
+    <li><a href="{{ url_for('shelf_view', shelf_name='to-read') }}">to-read</a></li>
+    <li><a href="{{ url_for('shelf_view', shelf_name='read') }}">read</a></li>
+    <li><a href="{{ url_for('shelf_view', shelf_name='owned') }}">owned</a></li>
+  </ul>
+{% endblock %}
+
+EOF
+
+echo "Creating file: src/webui/templates/search.html"
+cat << 'EOF' > "src/webui/templates/search.html"
+{% extends "layout.html" %}
+{% block title %}Manual Search{% endblock %}
+{% block content %}
+  <h2>Manual Search</h2>
+  <form id="manualSearchForm">
+    <label>Query: <input type="text" name="query" style="width:300px"></label>
+    <button class="btn primary" type="submit">Search</button>
+  </form>
+
+  <div id="manualSearchResult" style="margin-top:1em;"></div>
+
+  <script>
+    document.getElementById('manualSearchForm').addEventListener('submit', async (ev)=>{
+      ev.preventDefault();
+      const q = ev.target.query.value.trim();
+      if(!q) return;
+      document.getElementById('manualSearchResult').innerText = 'Searching...';
+      const res = await fetch('/api/manual_search', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({query:q})
+      });
+      const j = await res.json();
+      if(res.ok){
+        let html = '<h3>Results</h3><table class="books-table"><thead><tr><th>Title</th><th>Author</th><th>Action</th></tr></thead><tbody>';
+        if(Array.isArray(j.candidates)){
+          j.candidates.forEach(c=>{
+            html += `<tr><td>${c.title||''}</td><td>${c.author||''}</td>
+                       <td><button class="btn" onclick="queueCandidate('${c.id||c.md5||''}')">Queue</button></td></tr>`;
+          });
+        }
+        html += '</tbody></table>';
+        document.getElementById('manualSearchResult').innerHTML = html;
+      } else {
+        document.getElementById('manualSearchResult').innerText = 'Error: ' + JSON.stringify(j);
+      }
+    });
+
+    async function queueCandidate(id){
+      if(!id) return alert('Missing candidate id');
+      const res = await fetch('/api/queue_from_candidate', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({candidate_id:id})
+      });
+      const j = await res.json();
+      alert(JSON.stringify(j));
+    }
+  </script>
+{% endblock %}
+
+EOF
+
+echo "Creating file: src/webui/templates/downloads.html"
+cat << 'EOF' > "src/webui/templates/downloads.html"
+{# templates/downloads.html #}
+{% extends "layout.html" %}
+{% block title %}Downloads{% endblock %}
+{% block content %}
+  <h2>Download Queue & Status</h2>
+  <p><button id="refreshBtn" class="btn">Refresh</button> <a href="{{ url_for('shelf_view', shelf_name='to-download') }}">Back to Shelves</a></p>
+
+  <div id="backendStatus" class="info small">Checking backend...</div>
+
+  <h3>Queue</h3>
+  <pre id="queueStatus">Loading...</pre>
+
+  <h3>Active Downloads</h3>
+  <table class="books-table" id="active-table">
+    <thead><tr><th>Title</th><th>Status</th><th>Progress</th><th>Priority</th><th>Action</th></tr></thead>
+    <tbody></tbody>
+  </table>
+{% endblock %}
+
 EOF
 
 echo "Creating file: src/webui/templates/status.html"
 cat << 'EOF' > "src/webui/templates/status.html"
+{# templates/status.html #}
 {% extends "layout.html" %}
 {% block title %}Status{% endblock %}
-{% block header %}Ebooks Manager Status{% endblock %}
 {% block content %}
-<p>This page automatically refreshes every 60 seconds. Last updated: {{ now | strftime }}</p>
-
-<h2>Sync History (Newest First)</h2>
-<table>
-    <thead>
-        <tr>
-            <th style="width:15%">Timestamp</th>
-            <th style="width:10%">Action</th>
-            <th>Book Title / ID</th>
-            <th>Details</th>
-            <th style="width:10%">Status</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% if history %}
-            {% for entry in history %}
-            <tr>
-                <td>{{ entry.timestamp | strftime }}</td>
-                <td><strong>{{ entry.action | capitalize }}</strong></td>
-                <td>
-                    <strong>{{ entry.title or 'N/A' }}</strong><br>
-                    <small>ID: <code>{{ entry.book_id or '' }}</code></small>
-                </td>
-                <td>
-                    {% if entry.query %}Query: <code>{{ entry.query }}</code><br>{% endif %}
-                    {% if entry.result_id %}Result ID: <code>{{ entry.result_id }}</code>{% endif %}
-                </td>
-                <td>
-                    {% if entry.status %}
-                        <span class="status-{{ entry.status | lower }}">{{ entry.status | replace('_', ' ') | capitalize }}</span>
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-        {% else %}
-            <tr>
-                <td colspan="5" style="text-align: center;">No history entries yet.</td>
-            </tr>
-        {% endif %}
-    </tbody>
-</table>
-
-<h2>Recent Logs (Last 50 lines)</h2>
-<pre><code>{{ log_content or 'Log file is empty or not found.' }}</code></pre>
+  <h2>System Status</h2>
+  <div id="sysStatus" class="info small">Loading...</div>
+  <script>
+    async function loadStatus(){
+      const res = await fetch('/api/backend_info');
+      const j = await res.json();
+      document.getElementById('sysStatus').innerText = JSON.stringify(j, null, 2);
+    }
+    loadStatus();
+  </script>
 {% endblock %}
+
 EOF
 
 echo "Creating file: src/webui/templates/shelf_view.html"
 cat << 'EOF' > "src/webui/templates/shelf_view.html"
 {% extends "layout.html" %}
-{% block title %}{{ shelf_name | capitalize }} Shelf{% endblock %}
-{% block header %}{{ shelf_name | capitalize }} Shelf (Sync Status: {{ sync_status }}){% endblock %}
+{% block title %}Shelf: {{ shelf_name }}{% endblock %}
 {% block content %}
-<table>
+  <h2>Shelf: {{ shelf_name }}</h2>
+
+  <form action="{{ url_for('sync_shelf', shelf_name=shelf_name) }}" method="post" style="margin-bottom:1em;">
+    <button class="btn primary">🔄 Sync Now</button>
+  </form>
+
+  <table class="books-table">
     <thead>
-        <tr>
-            <th>Title</th>
-            <th>Author</th>
-            <th>Goodreads ID</th>
-            <th>URL</th>
-        </tr>
+      <tr>
+        <th>#</th>
+        <th>Cover</th>
+        <th>Title</th>
+        <th>Author</th>
+        <th>Series</th>
+        <th>Shelves</th>
+        <th>Added</th>
+        <th>Actions</th>
+      </tr>
     </thead>
     <tbody>
-        {% for book in books %}
+      {% for book in books %}
         <tr>
-            <td>{{ book.title }}</td>
-            <td>{{ book.author }}</td>
-            <td>{{ book.goodreads_id }}</td>
-            <td><a href="{{ book.book_url }}">View</a></td>
+          <td>{{ offset + loop.index }}</td>
+          <td>
+            {% if book.cover_local_path %}
+              <img src="{{ url_for('serve_cover', filename=book.cover_local_path) }}" style="height:60px;">
+            {% else %}
+              cover
+            {% endif %}
+          </td>
+          <td><a href="https://www.goodreads.com/book/show/{{ book.goodreads_id }}" target="_blank">{{ book.title }}</a></td>
+          <td>{{ book.author }}</td>
+          <td>
+            {% if book.series_name %}
+              {{ book.series_name }} #{{ book.series_number }}
+            {% endif %}
+          </td>
+          <td>{{ book.shelves }}</td>
+          <td>{{ book.added|default('') }}</td>
+          <td>
+            <form class="inline-form" method="post" action="{{ url_for('api_search_and_queue') }}">
+              <input type="hidden" name="goodreads_id" value="{{ book.goodreads_id }}">
+              <input type="hidden" name="title" value="{{ book.title }}">
+              <input type="hidden" name="author" value="{{ book.author }}">
+              <button class="btn">Download</button>
+            </form>
+          </td>
         </tr>
-        {% endfor %}
-        {% if not books %}
-        <tr><td colspan="4">No books found.</td></tr>
-        {% endif %}
+      {% endfor %}
     </tbody>
-</table>
+  </table>
+
+  <div class="pagination">
+    {% if page > 1 %}
+      <a href="{{ url_for('shelf_view', shelf_name=shelf_name, page=page-1) }}">Prev</a>
+    {% endif %}
+    Page {{ page }}
+    {% if has_next %}
+      <a href="{{ url_for('shelf_view', shelf_name=shelf_name, page=page+1) }}">Next</a>
+    {% endif %}
+  </div>
 {% endblock %}
+
+EOF
+mkdir -p "src/webui/static"
+mkdir -p "src/webui/static/css"
+
+echo "Creating file: src/webui/static/css/style.css"
+cat << 'EOF' > "src/webui/static/css/style.css"
+/* static/css/style.css - lightweight styling */
+:root { --accent:#2c7be5; --muted:#666; --bg:#fafafa; --card:#fff; }
+body { font-family: Inter, Arial, Helvetica, sans-serif; background: var(--bg); color: #111; margin:0; }
+.container { max-width: 1100px; margin: 18px auto; padding: 0 16px; }
+.site-header { background: #0f1724; color: #fff; padding: 12px 0; }
+.site-header .container { display:flex; align-items:center; gap:18px; }
+.brand a { color: #fff; text-decoration:none; font-weight:600; }
+.site-header nav a { color: #dbeafe; margin-right:12px; text-decoration:none; }
+.site-footer { padding: 14px 0; margin-top: 28px; border-top: 1px solid #eee; color:var(--muted); }
+
+.controls { margin: 12px 0; display:flex; gap:8px; align-items:center; }
+.btn { background:#fff; border:1px solid #ddd; padding:6px 10px; border-radius:6px; cursor:pointer; }
+.btn.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+.small { font-size:0.9rem; color:var(--muted); }
+.books-table { width:100%; border-collapse:collapse; background:#fff; border-radius:6px; overflow:hidden; box-shadow:0 1px 2px rgba(0,0,0,0.03); }
+.books-table th, .books-table td { padding:10px 8px; border-bottom:1px solid #f1f5f9; }
+.cover { width:48px; height:auto; border-radius:4px; display:block; }
+.cover-cell { width:64px; }
+.pagination { margin-top:12px; }
+.status-panel { margin-top:12px; padding:8px; background:#fff; border:1px solid #eee; border-radius:6px; }
+
+.info { background:#fff; padding:8px; border-radius:6px; border:1px solid #eee; }
+
+EOF
+mkdir -p "src/webui/static/js"
+
+echo "Creating file: src/webui/static/js/app.js"
+cat << 'EOF' > "src/webui/static/js/app.js"
+// static/js/app.js
+document.addEventListener('DOMContentLoaded', function(){
+  // wire queue + auto-queue buttons if on a shelf page
+  document.querySelectorAll('.queue-btn').forEach(btn=>{
+    btn.addEventListener('click', async function(e){
+      const tr = e.target.closest('tr');
+      if(!tr) return;
+      const id = tr.dataset.goodreadsId;
+      try {
+        const res = await fetch('/api/download_proxy', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({id: id, priority: 0})
+        });
+        const j = await res.json();
+        if (res.ok) alert('Queued: ' + (j.status || JSON.stringify(j)));
+        else alert('Queue error: ' + (j.error || JSON.stringify(j)));
+      } catch(err){
+        alert('Network error: ' + err);
+      }
+    });
+  });
+
+  document.querySelectorAll('.auto-queue-btn').forEach(btn=>{
+    btn.addEventListener('click', async function(e){
+      const tr = e.target.closest('tr');
+      if(!tr) return;
+      const payload = {
+        goodreads_id: tr.dataset.goodreadsId,
+        title: tr.dataset.title,
+        author: tr.dataset.author,
+        isbn: tr.dataset.isbn || '',
+        isbn13: tr.dataset.isbn13 || ''
+      };
+      e.target.disabled = true;
+      e.target.innerText = 'Searching...';
+      try {
+        const res = await fetch('/api/search_and_queue', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const j = await res.json();
+        if(res.ok){
+          if(j.queued){
+            alert('Auto-queued candidate: ' + (j.candidate && (j.candidate.title || j.candidate.id) || 'ok'));
+          } else if(j.candidates){
+            // show top candidates and let user choose
+            const choose = confirm('No confident match. Show top candidate? (OK = choose top)');
+            if(choose && j.candidates && j.candidates.length){
+              // call queue_from_candidate for first candidate
+              const c = j.candidates[0];
+              const qres = await fetch('/api/queue_from_candidate', {
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({candidate_id: c.id})
+              });
+              const qj = await qres.json();
+              if(qres.ok) alert('Queued: ' + JSON.stringify(qj));
+              else alert('Queue failed: ' + JSON.stringify(qj));
+            }
+          } else {
+            alert('Search completed: ' + JSON.stringify(j));
+          }
+        } else {
+          alert('Search error: ' + JSON.stringify(j));
+        }
+      } catch (err){
+        alert('Network error: ' + err);
+      } finally {
+        e.target.disabled = false;
+        e.target.innerText = 'Auto Queue';
+      }
+    });
+  });
+
+  // per-page select
+  const pp = document.getElementById('per_page_select');
+  if(pp){
+    pp.addEventListener('change', function(){
+      const params = new URLSearchParams(window.location.search);
+      params.set('per_page', this.value);
+      params.set('page', '1');
+      window.location.search = params.toString();
+    });
+  }
+
+  // sync button
+  const syncBtn = document.getElementById('syncBtn');
+  if(syncBtn){
+    syncBtn.addEventListener('click', async function(){
+      const shelf = (window.location.pathname.split('/').pop() || 'to-download');
+      const res = await fetch('/sync/' + encodeURIComponent(shelf), {method:'POST'});
+      const j = await res.json();
+      document.getElementById('syncStatus').innerText = j.status || JSON.stringify(j);
+      setTimeout(()=>window.location.reload(), 2000);
+    });
+  }
+
+  // downloads page refresh
+  const refreshBtn = document.getElementById('refreshBtn');
+  if(refreshBtn){
+    refreshBtn.addEventListener('click', ()=>{
+      fetch('/api/status_proxy').then(r=>r.json()).then(j=>{
+        document.getElementById('queueStatus').innerText = JSON.stringify(j, null, 2);
+      }).catch(e=>document.getElementById('queueStatus').innerText = e);
+      fetch('/api/active_proxy').then(r=>r.json()).then(j=>{
+        const tbody = document.querySelector('#active-table tbody');
+        tbody.innerHTML = '';
+        if(Array.isArray(j.active_downloads)){
+          j.active_downloads.forEach(item=>{
+            const tr = document.createElement('tr');
+            tr.innerHTML = `<td>${item.title||item.id||'unknown'}</td><td>${item.status||''}</td>
+                            <td>${(item.progress||0)}%</td><td>${item.priority||0}</td>
+                            <td><button class="btn" onclick="cancelDownload('${item.id||item.book_id||item.md5}')">Cancel</button></td>`;
+            tbody.appendChild(tr);
+          });
+        } else {
+          tbody.innerHTML = `<tr><td colspan="5">${JSON.stringify(j)}</td></tr>`;
+        }
+      }).catch(e=>console.error(e));
+    });
+  }
+
+});
+
+// helper used in downloads UI
+async function cancelDownload(bookId){
+  if(!bookId) return alert('Missing book id');
+  const res = await fetch('/api/download/' + encodeURIComponent(bookId) + '/cancel_proxy', {method: 'DELETE'});
+  const j = await res.json();
+  alert(JSON.stringify(j));
+}
+
 EOF
 
 echo "Creating file: src/webui/__init__.py"
 cat << 'EOF' > "src/webui/__init__.py"
+
 EOF
 mkdir -p "src/utils"
 
@@ -1444,6 +2122,7 @@ def setup_logger(log_file, level='INFO'):
     logger = logging.getLogger()
     logger.debug(f"Logger initialized with file: {log_path}, level: {log_level}")
     return logger
+
 EOF
 
 echo "Creating file: src/utils/config_loader.py"
@@ -1468,59 +2147,447 @@ def load_config(config_path='/app/config/config.json'):
         raise Exception(f"Configuration file {config_path} not found")
     except json.JSONDecodeError:
         raise Exception(f"Invalid JSON in configuration file {config_path}")
+
+EOF
+
+echo "Creating file: src/utils/migrate_db.py"
+cat << 'EOF' > "src/utils/migrate_db.py"
+#!/usr/bin/env python3
+# src/utils/migrate_db.py
+import sqlite3, json, sys
+from pathlib import Path
+
+def load_config(p="/app/config/config.json"):
+    p = Path(p)
+    if not p.exists():
+        return {}
+    return json.loads(p.read_text())
+
+cfg = load_config()
+db_path = cfg.get("database_path", "/app/data/databases/goodreads.db")
+db_path = Path(db_path)
+if not db_path.exists():
+    print("DB not found at", db_path, "- nothing to migrate.")
+    sys.exit(0)
+
+print("Migrating DB at:", db_path)
+conn = sqlite3.connect(str(db_path))
+cur = conn.cursor()
+cur.execute("PRAGMA table_info(books)")
+cols = cur.fetchall()
+existing = {c[1] for c in cols}  # name is index 1
+
+desired = {
+    "title_raw": "TEXT",
+    "title_clean": "TEXT",
+    "author_first": "TEXT",
+    "series_name": "TEXT",
+    "series_number": "TEXT",
+    "series_id": "TEXT",
+    "position": "INTEGER",
+    "cover_url": "TEXT",
+    "cover_local_path": "TEXT",
+    "book_url": "TEXT",
+    "isbn": "TEXT",
+    "isbn13": "TEXT",
+    "asin": "TEXT",
+    "avg_rating": "REAL",
+    "num_ratings": "INTEGER",
+    "date_pub": "TEXT",
+    "date_pub_edition": "TEXT",
+    "num_pages": "INTEGER",
+    "rating": "INTEGER",
+    "shelves": "TEXT",
+    "review": "TEXT",
+    "notes": "TEXT",
+    "comments": "INTEGER",
+    "votes": "INTEGER",
+    "date_read": "TEXT",
+    "date_started": "TEXT",
+    "date_added": "TEXT",
+    "date_purchased": "TEXT",
+    "purchase_location": "TEXT",
+    "owned": "INTEGER",
+    "condition": "TEXT",
+    "format": "TEXT",
+    "recommender": "TEXT",
+    "read_count": "INTEGER",
+    "genres": "TEXT",
+    "json_details": "TEXT",
+    "last_seen": "TIMESTAMP"
+}
+
+for col, typ in desired.items():
+    if col not in existing:
+        sql = f"ALTER TABLE books ADD COLUMN {col} {typ}"
+        print("Adding column:", col)
+        try:
+            cur.execute(sql)
+        except Exception as e:
+            print("Failed to add", col, ":", e)
+    else:
+        print("Already has column:", col)
+
+conn.commit()
+conn.close()
+print("Migration complete.")
+
 EOF
 
 echo "Creating file: src/utils/database.py"
 cat << 'EOF' > "src/utils/database.py"
+# src/utils/database.py
+"""
+Robust SQLite database wrapper for ebooks-manager.
+
+- Creates/maintains a `books` table with a wide column set to accept scraper data.
+- Creates a `history` table for sync/fetch events.
+- Provides CRUD + pagination + helper functions used by webui and scrapers.
+"""
+
 import sqlite3
 import json
+import logging
 from pathlib import Path
+from datetime import datetime
+from typing import List, Optional, Dict, Any
+
+LOG = logging.getLogger(__name__)
+
+BOOK_COLUMNS = [
+    "goodreads_id", "title", "title_clean", "author", "author_first",
+    "series_name", "series_number", "series_id", "pub_date", "pub_date_edition",
+    "num_pages", "isbn", "isbn13", "asin", "language",
+    "genres", "json_details", "position", "cover_url", "cover_local_path",
+    "book_url", "avg_rating", "num_ratings", "rating", "shelves",
+    "review", "notes", "comments", "votes", "date_read",
+    "date_started", "date_added", "date_purchased", "purchase_location", "owned",
+    "condition", "format", "recommender", "read_count", "cover_downloaded",
+    "last_synced"
+]
+
+COLUMN_DEFS = {
+    "goodreads_id": "TEXT PRIMARY KEY",
+    "title": "TEXT",
+    "title_clean": "TEXT",
+    "author": "TEXT",
+    "author_first": "TEXT",
+    "series_name": "TEXT",
+    "series_number": "TEXT",
+    "series_id": "TEXT",
+    "pub_date": "TEXT",
+    "pub_date_edition": "TEXT",
+    "num_pages": "INTEGER",
+    "isbn": "TEXT",
+    "isbn13": "TEXT",
+    "asin": "TEXT",
+    "language": "TEXT",
+    "genres": "TEXT",
+    "json_details": "TEXT",
+    "position": "INTEGER",
+    "cover_url": "TEXT",
+    "cover_local_path": "TEXT",
+    "book_url": "TEXT",
+    "avg_rating": "REAL",
+    "num_ratings": "INTEGER",
+    "rating": "INTEGER",
+    "shelves": "TEXT",
+    "review": "TEXT",
+    "notes": "TEXT",
+    "comments": "INTEGER",
+    "votes": "INTEGER",
+    "date_read": "TEXT",
+    "date_started": "TEXT",
+    "date_added": "TEXT",
+    "date_purchased": "TEXT",
+    "purchase_location": "TEXT",
+    "owned": "TEXT",
+    "condition": "TEXT",
+    "format": "TEXT",
+    "recommender": "TEXT",
+    "read_count": "INTEGER",
+    "cover_downloaded": "INTEGER",
+    "last_synced": "TEXT"
+}
+
 
 class Database:
-    def __init__(self, db_path):
+    def __init__(self, db_path: Optional[str] = None):
+        if db_path is None:
+            db_path = "./goodreads.db"
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.init_db()
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self._ensure_tables_and_schema()
 
-    def init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS books (
-                    goodreads_id TEXT PRIMARY KEY,
-                    title TEXT,
-                    author TEXT,
-                    series_name TEXT,
-                    series_number TEXT,
-                    pub_date TEXT,
-                    num_pages INTEGER,
-                    isbn TEXT,
-                    asin TEXT,
-                    language TEXT,
-                    genres TEXT,
-                    json_details TEXT
-                )
-            ''')
-            conn.commit()
+    def _ensure_tables_and_schema(self) -> None:
+        try:
+            cur = self.conn.cursor()
 
-    def save_book(self, details):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            json_details = json.dumps(details)
-            cursor.execute('''
-                INSERT OR REPLACE INTO books (goodreads_id, title, author, json_details)
-                VALUES (?, ?, ?, ?)
-            ''', (
-                details['goodreads_id'],
-                details.get('title'),
-                details.get('author'),
-                json_details
-            ))
-            conn.commit()
+            columns_sql = ",\n  ".join(
+                f"{col} {COLUMN_DEFS.get(col, 'TEXT')}" for col in BOOK_COLUMNS
+            )
+            create_books_sql = f"""
+            CREATE TABLE IF NOT EXISTS books (
+              {columns_sql}
+            );
+            """
+            cur.execute(create_books_sql)
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_books_date_added ON books(date_added);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_books_title ON books(title);")
+
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT,
+                action TEXT,
+                book_id TEXT,
+                title TEXT,
+                status TEXT,
+                meta TEXT
+            );
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_history_ts ON history(ts);")
+
+            self.conn.commit()
+            self._migrate_add_missing_columns()
+
+        except Exception:
+            LOG.exception("Failed to ensure DB schema")
+
+    def _get_existing_columns(self) -> List[str]:
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(books);")
+        rows = cur.fetchall()
+        return [r["name"] for r in rows]
+
+    def _migrate_add_missing_columns(self) -> None:
+        try:
+            existing = set(self._get_existing_columns())
+            cur = self.conn.cursor()
+            for col in BOOK_COLUMNS:
+                if col not in existing:
+                    col_def = COLUMN_DEFS.get(col, "TEXT")
+                    LOG.info("Migrating DB: adding missing column %s %s", col, col_def)
+                    cur.execute(f"ALTER TABLE books ADD COLUMN {col} {col_def};")
+            self.conn.commit()
+        except Exception:
+            LOG.exception("DB migration failed while adding missing columns")
+
+    def close(self) -> None:
+        try:
+            self.conn.commit()
+            self.conn.close()
+        except Exception:
+            pass
+
+    def save_book(self, book: Dict[str, Any], shelves: Optional[List[str]] = None) -> bool:
+        try:
+            cur = self.conn.cursor()
+
+            json_details = book.get("json_details")
+            if json_details is None:
+                try:
+                    json_details = json.dumps(book, ensure_ascii=False)
+                except Exception:
+                    json_details = json.dumps(str(book))
+
+            shelves_val = None
+            if shelves:
+                shelves_val = ", ".join(s.strip() for s in shelves if s and s.strip())
+            elif book.get("shelves"):
+                sv = book.get("shelves")
+                if isinstance(sv, list):
+                    shelves_val = ", ".join(sv)
+                else:
+                    shelves_val = str(sv)
+
+            values = []
+            for col in BOOK_COLUMNS:
+                if col == "json_details":
+                    values.append(json_details)
+                    continue
+                if col == "shelves":
+                    values.append(shelves_val if shelves_val is not None else book.get("shelves"))
+                    continue
+                values.append(book.get(col))
+
+            placeholders = ",".join(["?"] * len(BOOK_COLUMNS))
+            cols_sql = ",".join(BOOK_COLUMNS)
+            sql = f"INSERT OR REPLACE INTO books ({cols_sql}) VALUES ({placeholders})"
+            cur.execute(sql, values)
+            self.conn.commit()
+            return True
+        except Exception:
+            LOG.exception("Failed to save book to DB: %s", book.get("goodreads_id"))
+            return False
+
+    def get_book_by_id(self, goodreads_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            cur = self.conn.cursor()
+            cur.execute("SELECT * FROM books WHERE goodreads_id = ?", (goodreads_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            return dict(row)
+        except Exception:
+            LOG.exception("Failed to fetch book by id %s", goodreads_id)
+            return None
+
+    def update_book(self, goodreads_id: str, updates: Dict[str, Any]) -> bool:
+        try:
+            allowed = set(BOOK_COLUMNS)
+            set_parts = []
+            params = []
+            for k, v in updates.items():
+                if k not in allowed:
+                    LOG.debug("Ignoring unknown update column: %s", k)
+                    continue
+                set_parts.append(f"{k} = ?")
+                if k == "json_details" and not isinstance(v, str):
+                    params.append(json.dumps(v, ensure_ascii=False))
+                else:
+                    params.append(v)
+            if not set_parts:
+                return False
+            params.append(goodreads_id)
+            sql = f"UPDATE books SET {', '.join(set_parts)} WHERE goodreads_id = ?"
+            cur = self.conn.cursor()
+            cur.execute(sql, params)
+            self.conn.commit()
+            return True
+        except Exception:
+            LOG.exception("Failed to update book %s", goodreads_id)
+            return False
+
+    def delete_book(self, goodreads_id: str) -> bool:
+        try:
+            cur = self.conn.cursor()
+            cur.execute("DELETE FROM books WHERE goodreads_id = ?", (goodreads_id,))
+            self.conn.commit()
+            return True
+        except Exception:
+            LOG.exception("Failed to delete book %s", goodreads_id)
+            return False
+
+    def get_books_by_shelf(
+        self,
+        shelf_name: str,
+        limit: Optional[int] = 30,
+        offset: Optional[int] = 0,
+        order_by: str = "date_added DESC"
+    ) -> List[Dict[str, Any]]:
+        try:
+            cur = self.conn.cursor()
+            like_pattern = f"%{shelf_name}%"
+            sql = f"SELECT * FROM books WHERE shelves LIKE ? ORDER BY {order_by}"
+            params = [like_pattern]
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(limit)
+                if offset:
+                    sql += " OFFSET ?"
+                    params.append(offset)
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            LOG.exception("Failed to read books by shelf")
+            return []
+
+    def get_all_books(self, limit: Optional[int] = None, offset: Optional[int] = 0) -> List[Dict[str, Any]]:
+        try:
+            cur = self.conn.cursor()
+            sql = "SELECT * FROM books ORDER BY date_added DESC"
+            params = []
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(limit)
+                if offset:
+                    sql += " OFFSET ?"
+                    params.append(offset)
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            LOG.exception("Failed to fetch all books")
+            return []
+
+    def get_shelves(self) -> List[str]:
+        try:
+            cur = self.conn.cursor()
+            cur.execute("SELECT shelves FROM books WHERE shelves IS NOT NULL")
+            rows = cur.fetchall()
+            sset = set()
+            for r in rows:
+                s = r["shelves"]
+                if not s:
+                    continue
+                parts = [p.strip() for p in str(s).split(",")]
+                for p in parts:
+                    if p:
+                        sset.add(p)
+            return sorted(sset)
+        except Exception:
+            LOG.exception("Failed to compute shelves")
+            return []
+
+    def add_history(self, action: str, book_id: Optional[str], title: Optional[str], status: str, meta: Optional[Dict[str, Any]] = None) -> bool:
+        try:
+            cur = self.conn.cursor()
+            ts = datetime.utcnow().isoformat()
+            meta_json = json.dumps(meta or {}, ensure_ascii=False)
+            cur.execute("INSERT INTO history (ts, action, book_id, title, status, meta) VALUES (?, ?, ?, ?, ?, ?)",
+                        (ts, action, book_id, title, status, meta_json))
+            self.conn.commit()
+            return True
+        except Exception:
+            LOG.exception("Failed to add history entry for %s", book_id)
+            return False
+
+    def get_history(self, limit: int = 200) -> List[Dict[str, Any]]:
+        try:
+            cur = self.conn.cursor()
+            cur.execute("SELECT * FROM history ORDER BY ts DESC LIMIT ?", (limit,))
+            rows = cur.fetchall()
+            out = []
+            for r in rows:
+                rr = dict(r)
+                try:
+                    rr["meta"] = json.loads(rr.get("meta") or "{}")
+                except Exception:
+                    rr["meta"] = rr.get("meta")
+                out.append(rr)
+            return out
+        except Exception:
+            LOG.exception("Failed to get history")
+            return []
+
+    def vacuum(self) -> None:
+        try:
+            cur = self.conn.cursor()
+            cur.execute("VACUUM;")
+            self.conn.commit()
+        except Exception:
+            LOG.exception("VACUUM failed")
+
+    def row_count(self) -> int:
+        try:
+            cur = self.conn.cursor()
+            cur.execute("SELECT COUNT(1) AS c FROM books")
+            r = cur.fetchone()
+            return int(r["c"]) if r else 0
+        except Exception:
+            LOG.exception("Failed to count rows")
+            return 0
+
 EOF
 
 echo "Creating file: src/utils/__init__.py"
 cat << 'EOF' > "src/utils/__init__.py"
+
 EOF
 
 echo "Creating file: src/job_runner.py"
@@ -1561,10 +2628,12 @@ if __name__ == "__main__":
     config = load_config()  # Load config early
     setup_logger(config['log_file'], os.getenv('LOG_LEVEL', 'DEBUG'))
     logging.info("Job runner starting")
-    run_jobs()EOF
+    run_jobs()
+EOF
 
 echo "Creating file: src/__init__.py"
 cat << 'EOF' > "src/__init__.py"
+
 EOF
 
 echo "Creating file: docker-compose.yml"
@@ -1632,47 +2701,368 @@ services:
       - "8191:8191"
     restart: unless-stopped
     network_mode: "service:adguardhome_essential"
+
 EOF
 
 echo "Creating file: README.md"
 cat << 'EOF' > "README.md"
-# Ebooks Manager
+# Ebooks Manager — README
 
-A Python-based project to manage ebook downloads by scraping Goodreads shelves using Selenium and interfacing with the Calibre-Web-Automated-Book-Downloader API.
+A short, practical guide to help you (and future ChatGPT sessions) understand this project, how it’s organized, how to run it, and where the important files live. Use this as the canonical orientation when you return to the project or ask for help.
 
-## Setup
+---
 
-1. Copy `config/config.json.template` to `/mnt/data/docker/docker-config/ebooks-manager/config/config.json` or set environment variables (e.g., `GOODREADS_USERNAME`, `GOODREADS_PASSWORD`, `CWA_API_URL`, etc.) for credentials.
-2. Copy `.env.example` to `.env` in the project root and adjust as needed.
-3. Run `bash setup_project.sh` to create the project structure.
-4. Run `docker-compose up --build` to build and start the containers (ebooks-manager and flaresolverr).
-5. Access the web interface at `http://ebooks-manager.mayserver.local:5002`.
+# Overview
 
-## Directory Structure
+**Ebooks Manager** is a self-hosted application that:
 
-- `config/`: Configuration files
-- `data/`: Databases, cache, and webpage storage
-- `logs/`: History, sync logs, and screenshots
-- `scripts/`: Entrypoint and setup scripts
-- `src/`: Source code
-  - `api/`: API clients (e.g., CWA)
-  - `scrapers/`: Website scraping logic
-  - `utils/`: Shared utilities
-  - `webui/`: Web interface
+- Scrapes your Goodreads shelf(s) (using a Selenium-enabled or `requests` fallback scraper).
+- Stores book metadata in a local SQLite database.
+- Integrates with a remote download/search backend (e.g. Calibre-Web-Automated (CWA) or the AA-based backend) to search for and queue downloads.
+- Provides a Flask web UI to view shelves, queue downloads, and monitor download status.
 
-## Environment Variables
+Key goals of the recent refactor:
+- Robust, extensible `Database` that tolerates schema changes and supports pagination (offset).
+- Cleaner web UI that reads from the DB (not live scraping), serves downloaded cover images, and includes a downloads page.
+- Goodreads scraper improved to use the special `#ALL#` shelf view, a configurable per-page parameter (defaults to 100), pagination, dynamic column mapping, cover downloading, and search-request logging.
+- Search requests and candidate results saved to `cache/search_requests/` for later inspection and debugging.
 
-- `GOODREADS_USERNAME`, `GOODREADS_PASSWORD`, `GOODREADS_USER_ID`: Goodreads credentials
-- `CWA_API_URL`, `CWA_USERNAME`, `CWA_PASSWORD`: Calibre-Web API details
-- `LOG_LEVEL`: Set to `DEBUG` for detailed logs and screenshots
-- `DRY_RUN`: Set to `yes` to skip actual downloads
-- `WEBPAGE_CACHE_DAYS`: Cache expiration in days (default: 30)
-- `FLARESOLVERR_URL`: FlareSolverr service URL (default: `http://flaresolverr:8191/v1`)
+---
 
-## Debugging
-- All screenshots are now full-page captures.
-- If `LOG_LEVEL=DEBUG`, login failures trigger three rapid screenshots for diagnostics.
-- Check `/status`, `/history`, `/shelf/to-download`, and `/sync` endpoints in the web UI.
+# Repo layout (important files)
+
+```
+├── src/
+│ ├── scrapers/
+│ │ └── goodreads.py # Goodreads scraper (rewritten)
+│ ├── utils/
+│ │ └── database.py # Robust DB layer (rewritten)
+│ ├── webui/
+│ │ ├── app.py # Flask web UI backend (serves pages)
+│ │ └── templates/ # Jinja templates (layout, shelf_view, downloads, status)
+│ │	│   ├── layout.html
+│ │	│   ├── shelf_view.html
+│ │	│   ├── downloads.html
+│ │	│   ├── shelves.html
+│ │	│   ├── status.html
+│ │	│   └── sync.html
+│ │	└── static/
+│ │		├── css/
+│ │		│   └── style.css
+│ │		└── js/
+│ │			└── app.js
+│ ├── api/
+│ │ └── cwa_client.py # Optional: CWA client wrapper (if present)
+│ └── ... # other modules (backend, downloader, models, logger)
+├── app/ # optional alternative layout for webui files
+├── docker-compose.yml # (your deployment file)
+└── README.md # this file
+```
+
+
+
+---
+
+# Key components & what they do
+
+### `src/utils/database.py`
+- Central DB wrapper around SQLite.
+- Creates `books` and `history` tables.
+- Adds missing columns automatically (so new scraper fields won’t break inserts).
+- Exposes:
+  - `save_book(book, shelves=None)`
+  - `get_book_by_id(goodreads_id)`
+  - `update_book(goodreads_id, updates)`
+  - `get_books_by_shelf(shelf_name, limit=30, offset=0)`
+  - `get_all_books`, `get_shelves`, `add_history`, `get_history`, and utility methods.
+- Fixes the prior `binding 39` error by building placeholders dynamically and keeping schema flexible.
+
+### `src/scrapers/goodreads.py`
+- Uses the `#ALL#` shelf view with `per_page` param (configurable; default `100`).
+- Can run with Selenium (if chromedriver/chrome present) to toggle settings and show all columns, otherwise falls back to `requests`.
+- Dynamically maps table headers to canonical keys (title, author, cover, isbn, etc.).
+- Extracts series info from title or, if missing, fetches the book page to find series id/number.
+- Downloads covers into `cache/covers/` and stores a local filename in DB `cover_local_path`.
+- Saves search request JSON files and candidate lists to `cache/search_requests/`.
+- Integrates with `CWAClient` or HTTP backend `/api/search` and `/api/download` to search & queue downloads.
+- Provides a `run_full_sync_and_queue_downloads(shelf_name="to-download")` helper to fetch the shelf and queue the best candidate for each book.
+
+### `src/webui/app.py`
+- Renders shelf pages from the DB (not scraping on demand).
+- Default `per_page` for UI = 30 (configurable via `WEBUI_PER_PAGE` env var).
+- Computes serial number (`offset + index + 1`) for each row.
+- Serves local covers via `/covers/<filename>`.
+- Adds `/downloads` UI page that polls `/api/status` to show queue/progress and allows cancel/clear.
+- Provides a small local API proxy to enqueue book downloads (`/webui/api/download`) that uses an in-process `backend` module if available or calls `DOWNLOAD_BACKEND_URL`.
+
+### Templates
+- `layout.html` — base layout and nav.
+- `shelf_view.html` — shelf listing with per-page control and "Download" button for each row.
+- `downloads.html` — download queue and controls (Cancel, Clear).
+- `status.html` — sync/fetch history partial.
+
+---
+
+# Important directories (in container)
+
+- `/app/data/cache/covers` — downloaded cover images (served by Flask).
+- `/app/data/cache/search_requests` — saved search request JSON and candidate dumps.
+- `/app/data/databases` — SQLite DB files (goodreads.db or as configured).
+- `/app/logs` — application logs.
+
+---
+
+# Config / Environment variables
+
+Common variables you can set (examples):
+
+- `GOODREADS_USER_ID` or put in your config dict: Goodreads numeric user id.
+- `GOODREADS_DB_PATH` — path to SQLite DB (default `/app/data/databases/goodreads.db`).
+- `WEBUI_PER_PAGE` — default per-page for the Web UI (default `30`).
+- `GOODREADS_PER_PAGE` — per_page used by the scraper (default `100`).
+- `DOWNLOAD_BACKEND_URL` — fallback HTTP backend URL for search/download endpoints (default `http://localhost:8080`).
+- `CWA_API_URL`, `CWA_USERNAME`, `CWA_PASSWORD` — if you use the `CWAClient` to search/queue.
+- Selenium:
+  - `HEADLESS=1` (default) or `0` to show browser.
+  - `CHROMIUM_BIN` — path to chromium binary.
+  - `CHROMEDRIVER_PATH` — path to chromedriver.
+- Ports / Flask config as usual.
+
+Example `docker-compose` snippet:
+```yaml
+services:
+  ebooks:
+    image: your-image
+    environment:
+      - WEBUI_PER_PAGE=30
+      - GOODREADS_PER_PAGE=100
+      - DOWNLOAD_BACKEND_URL=http://cwa-backend:8080
+      - CHROMEDRIVER_PATH=/usr/bin/chromedriver
+      - CHROMIUM_BIN=/usr/bin/chromium
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "5000:5000"
+```
+
+---
+
+# Key components & what they do
+
+### `src/utils/database.py`
+- Central DB wrapper around SQLite.
+- Creates `books` and `history` tables.
+- Adds missing columns automatically (so new scraper fields won’t break inserts).
+- Exposes:
+  - `save_book(book, shelves=None)`
+  - `get_book_by_id(goodreads_id)`
+  - `update_book(goodreads_id, updates)`
+  - `get_books_by_shelf(shelf_name, limit=30, offset=0)`
+  - `get_all_books`, `get_shelves`, `add_history`, `get_history`, and utility methods.
+- Fixes the prior `binding 39` error by building placeholders dynamically and keeping schema flexible.
+
+### `src/scrapers/goodreads.py`
+- Uses the `#ALL#` shelf view with `per_page` param (configurable; default `100`).
+- Can run with Selenium (if chromedriver/chrome present) to toggle settings and show all columns, otherwise falls back to `requests`.
+- Dynamically maps table headers to canonical keys (title, author, cover, isbn, etc.).
+- Extracts series info from title or, if missing, fetches the book page to find series id/number.
+- Downloads covers into `cache/covers/` and stores a local filename in DB `cover_local_path`.
+- Saves search request JSON files and candidate lists to `cache/search_requests/`.
+- Integrates with `CWAClient` or HTTP backend `/api/search` and `/api/download` to search & queue downloads.
+- Provides a `run_full_sync_and_queue_downloads(shelf_name="to-download")` helper to fetch the shelf and queue the best candidate for each book.
+
+### `src/webui/app.py`
+- Renders shelf pages from the DB (not scraping on demand).
+- Default `per_page` for UI = 30 (configurable via `WEBUI_PER_PAGE` env var).
+- Computes serial number (`offset + index + 1`) for each row.
+- Serves local covers via `/covers/<filename>`.
+- Adds `/downloads` UI page that polls `/api/status` to show queue/progress and allows cancel/clear.
+- Provides a small local API proxy to enqueue book downloads (`/webui/api/download`) that uses an in-process `backend` module if available or calls `DOWNLOAD_BACKEND_URL`.
+
+### Templates
+- `layout.html` — base layout and nav.
+- `shelf_view.html` — shelf listing with per-page control and "Download" button for each row.
+- `downloads.html` — download queue and controls (Cancel, Clear).
+- `status.html` — sync/fetch history partial.
+
+---
+
+# Important directories (in container)
+
+- `/app/data/cache/covers` — downloaded cover images (served by Flask).
+- `/app/data/cache/search_requests` — saved search request JSON and candidate dumps.
+- `/app/data/databases` — SQLite DB files (goodreads.db or as configured).
+- `/app/logs` — application logs.
+
+---
+
+# Config / Environment variables
+
+Common variables you can set (examples):
+
+- `GOODREADS_USER_ID` or put in your config dict: Goodreads numeric user id.
+- `GOODREADS_DB_PATH` — path to SQLite DB (default `/app/data/databases/goodreads.db`).
+- `WEBUI_PER_PAGE` — default per-page for the Web UI (default `30`).
+- `GOODREADS_PER_PAGE` — per_page used by the scraper (default `100`).
+- `DOWNLOAD_BACKEND_URL` — fallback HTTP backend URL for search/download endpoints (default `http://localhost:8080`).
+- `CWA_API_URL`, `CWA_USERNAME`, `CWA_PASSWORD` — if you use the `CWAClient` to search/queue.
+- Selenium:
+  - `HEADLESS=1` (default) or `0` to show browser.
+  - `CHROMIUM_BIN` — path to chromium binary.
+  - `CHROMEDRIVER_PATH` — path to chromedriver.
+- Ports / Flask config as usual.
+
+Example `docker-compose` snippet:
+```yaml
+services:
+  ebooks:
+    image: your-image
+    environment:
+      - WEBUI_PER_PAGE=30
+      - GOODREADS_PER_PAGE=100
+      - DOWNLOAD_BACKEND_URL=http://cwa-backend:8080
+      - CHROMEDRIVER_PATH=/usr/bin/chromedriver
+      - CHROMIUM_BIN=/usr/bin/chromium
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "5000:5000"
+```
+
+# Goodreads Scraper & Downloader Web UI
+
+This project provides a web interface and backend scraper to sync your Goodreads shelves, download book covers, and queue books for download through an external backend service.
+
+## How to Run
+
+You can run the application locally for development or deploy it using Docker.
+
+### Local (for development)
+
+1.  Create and activate a Python virtual environment.
+2.  Install the required dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+    *(Ensure `selenium`, `beautifulsoup4`, `requests`, `flask`, etc., are included).*
+3.  Make sure the database path (defined by `GOODREADS_DB_PATH` or the default) is writable.
+4.  Start the web application:
+    ```bash
+    python -m src.webui.app
+    ```
+    or
+    ```bash
+    python src/webui/app.py
+    ```
+
+### Docker
+
+1.  Build the Docker image from the provided Dockerfile.
+2.  Run the container, ensuring volumes for `/app/data` and `/app/logs` are mounted to persist data.
+3.  If using Selenium, set the following environment variables in your `docker-compose.yml` or run command:
+    * `CHROMEDRIVER_PATH`
+    * `CHROMIUM_BIN`
+
+---
+
+## Typical Workflows
+
+### 1. Initial Sync
+
+-   Start the application (or run the scraper script directly).
+-   The scraper will automatically fetch your entire Goodreads `#ALL#` shelf, paginating through the results.
+-   It downloads book covers locally and saves all book data as rows in the database.
+-   You can check the `/covers/` directory to see the saved images.
+
+### 2. Queue Downloads
+
+-   Navigate to a shelf in the web UI (e.g., `/shelf/<shelf_name>`).
+-   Click the "Download" button for a book.
+-   The backend performs a search using the cleaned title and author's first name.
+-   A JSON request is logged in `cache/search_requests/`.
+-   The best candidate is chosen based on a scoring algorithm and queued for download via the configured backend API (CWA or a fallback HTTP service).
+
+### 3. Monitor
+
+-   Open the `/downloads` page in the web UI to monitor the queue and see active downloads.
+
+---
+
+## Troubleshooting & Common Errors
+
+-   **`sqlite3.ProgrammingError: You did not supply a value for binding NN`**
+    -   **Fix:** This is handled by the rewritten Database module which constructs placeholders dynamically and migrates missing columns. If you still encounter this, ensure your DB file is correct. As a last resort, remove the database file to start fresh.
+
+-   **Missing covers or permission errors writing to the covers directory**
+    -   **Fix:** Ensure the `/app/data/cache/covers` directory is writable by the application user inside the container. You may need to adjust permissions with `chown` or `chmod`.
+
+-   **Selenium errors (e.g., Chromedriver missing)**
+    -   **Fix:** Ensure the `CHROMEDRIVER_PATH` environment variable matches the path to the installed chromedriver binary and `CHROMIUM_BIN` points to your chrome/chromium executable. The scraper will fall back to using `requests` if Selenium is not available.
+
+-   **Login/cookie issues for private Goodreads data**
+    -   **Fix:** The scraper can load and reuse Selenium cookies from `cache/logins/goodreads/cookies.pkl`. To scrape private content, perform an initial login with Selenium locally, save the cookies, and ensure the cookie file is included in your container.
+
+-   **Backend integration errors**
+    -   **Fix:** Verify that the `DOWNLOAD_BACKEND_URL` is correct and reachable from the application. The backend must support the `/api/search`, `/api/download`, and `/api/status` endpoints. Alternatively, provide an in-process backend module.
+
+-   **"Page shows 30 books but per_page was set to 100"**
+    -   **Fix:** The UI and the scraper have separate `per_page` settings. The default for the UI is 30, while the scraper defaults to 100. Adjust the relevant environment variables to match your expectations.
+
+---
+
+## Developer Notes & Next Steps
+
+Here are some recommended improvements:
+
+-   [ ] Add unit tests for `Database` methods and scraper parsing logic (especially `_map_row_by_headers`).
+-   [ ] Improve the search scoring logic and expose the top-N candidates in the UI to allow for manual override.
+-   [ ] Add authentication (Basic Auth or token-based) to the Web UI if exposing it to the internet.
+-   [ ] Implement retries and rate-limiting for external requests to avoid IP bans.
+-   [ ] Integrate a background worker/queue (e.g., Celery, RQ) for managing download jobs to improve concurrency.
+-   [ ] Add optional image resizing/caching and serve static assets through a CDN or reverse-proxy.
+-   [ ] Create a small admin/settings page in the UI to edit configuration (like `per_page` values and backend URLs) without restarting the application.
+
+---
+
+## File & Directory Reference
+
+### Saved Data Locations
+
+-   **Search Requests:** `cache/search_requests/search_<goodreads_id>_<timestamp>.json`
+-   **Search Results/Candidates:** `cache/search_requests/candidates_<goodreads_id>_<timestamp>.json`
+
+*These files are invaluable for debugging why the backend failed to find a good match for a book.*
+
+### Quick References
+
+-   **DB File Location (default):** `/app/data/databases/goodreads.db`
+-   **Cover Directory (default):** `/app/data/cache/covers`
+-   **Saved Search Requests:** `/app/data/cache/search_requests/`
+
+### Web UI Endpoints
+
+-   **Homepage:** `http://<host>:5000/`
+-   **Shelves:** `/shelf/to-download`, `/shelf/to-read`, `/shelf/read`
+-   **Downloads Queue:** `/downloads`
+-   **Serve Covers:** `/covers/<filename>`
+
+---
+
+## How to Ask for Help
+
+When you need assistance, provide the following information to get a concise and helpful response:
+
+1.  **Short project summary:** You can copy the first paragraph of this README.
+2.  **Path to the relevant code:** (e.g., `src/scrapers/goodreads.py`, `src/utils/database.py`, `src/webui/app.py`).
+3.  **A sample of recent logs:** The last 50 lines showing the error or behavior you want to debug.
+4.  **Exact steps you just ran:** How you started the app, environment variables, and whether Selenium is available.
+5.  **The desired behavior:** (e.g., “fix cover download permission”, “improve search scoring”, “make webui list sortable”).
+
+### Example Prompt:
+
+> I run the project with Docker using these envs: `GOODREADS_PER_PAGE=100`, `WEBUI_PER_PAGE=30`, `DOWNLOAD_BACKEND_URL=http://cwa:8080`. The web UI shows 30 per page but scraper logs say it fetched 100 per page. The UI raises `TypeError: get_books_by_shelf() got an unexpected keyword argument 'offset'`. Here are the last 50 log lines: (paste logs here). Please fix any remaining DB function mismatches and make the UI use the DB offset properly.
 EOF
 
 echo "----------------------------------------------------"

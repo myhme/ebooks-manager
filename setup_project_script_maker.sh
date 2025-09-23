@@ -21,7 +21,7 @@ CURRENT_SCRIPT_NAME=$(basename "$0")
 # These will be excluded from the generated script.
 IGNORE_PATTERNS=(
     ".git"
-	".github"
+    ".github"
     ".gitignore"
     ".dockerignore"
     "LICENSE"
@@ -96,7 +96,8 @@ find "$PROJECT_ROOT_DIR" -print0 | while IFS= read -r -d '' item; do
         echo "echo \"Creating file: $relative_path\"" >> "$OUTPUT_SCRIPT"
         echo "cat << 'EOF' > \"$relative_path\"" >> "$OUTPUT_SCRIPT"
         cat "$item" >> "$OUTPUT_SCRIPT"
-        echo "EOF" >> "$OUTPUT_SCRIPT"
+        # FIX: ensure EOF is always on its own line
+        printf '\nEOF\n' >> "$OUTPUT_SCRIPT"
     fi
 done
 
