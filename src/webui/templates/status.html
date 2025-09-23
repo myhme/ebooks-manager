@@ -1,27 +1,15 @@
-<!-- src/webui/templates/status.html -->
-<div class="card mb-3">
-  <div class="card-header">
-    Sync / Fetch History
-  </div>
-  <div class="card-body p-2" style="max-height:300px; overflow:auto;">
-    <ul class="list-group list-group-flush">
-      {% for h in history %}
-      <li class="list-group-item">
-        <div class="d-flex justify-content-between">
-          <div>
-            <strong>{{ h.action }}</strong>
-            {% if h.title %} — {{ h.title }}{% endif %}
-            <div class="small-txt">{{ h.ts }}</div>
-          </div>
-          <div class="text-end small-txt">
-            <div>{{ h.status }}</div>
-            <div class="small">{{ h.book_id }}</div>
-          </div>
-        </div>
-      </li>
-      {% else %}
-      <li class="list-group-item small-txt">No history yet</li>
-      {% endfor %}
-    </ul>
-  </div>
-</div>
+{# templates/status.html #}
+{% extends "layout.html" %}
+{% block title %}Status{% endblock %}
+{% block content %}
+  <h2>System Status</h2>
+  <div id="sysStatus" class="info small">Loading...</div>
+  <script>
+    async function loadStatus(){
+      const res = await fetch('/api/backend_info');
+      const j = await res.json();
+      document.getElementById('sysStatus').innerText = JSON.stringify(j, null, 2);
+    }
+    loadStatus();
+  </script>
+{% endblock %}

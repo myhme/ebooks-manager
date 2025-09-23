@@ -1,12 +1,13 @@
 {
-  "goodreads_username": "your_goodreads_email",
-  "goodreads_password": "your_goodreads_password",
-  "goodreads_user_id": "your_goodreads_user_id",
-  "cwa_api_url": "http://calibre-web:8084/request/api",
-  "cwa_username": "your_cwa_username",
-  "cwa_password": "your_cwa_password",
-  "database_path": "/app/data/databases/goodreads.db",
-  "log_file": "/app/logs/sync_log.txt",
-  "history_file": "/app/logs/history.json",
-  "cache_dir": "/app/data/cache"
+    "goodreads_username": "your_goodreads_email",
+    "goodreads_password": "your_goodreads_password",
+    "goodreads_user_id": "your_goodreads_user_id",
+    "cwa_api_url": "http://calibre-web:8084/request/api",
+    "cwa_username": "your_cwa_username",
+    "cwa_password": "your_cwa_password",
+    "database_path": "/app/data/databases/goodreads.db",
+    "log_file": "/app/logs/sync_log.txt",
+    "history_file": "/app/logs/history.json",
+    "cache_dir": "/app/data/cache",
+    "goodreads_per_page": 100
 }

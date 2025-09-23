@@ -1,19 +1,13 @@
+{# templates/shelves.html #}
 {% extends "layout.html" %}
 {% block title %}Shelves{% endblock %}
-{% block header %}Shelves{% endblock %}
 {% block content %}
+  <h2>Shelves</h2>
+  <p>Quick links to common shelves:</p>
   <ul>
-    {% for s in shelves %}
-      <li><a href="{{ url_for('shelf_view', shelf_name=s) }}">{{ s }}</a> — <button onclick="fetchShelf('{{ s }}')">Sync</button></li>
-    {% endfor %}
+    <li><a href="{{ url_for('shelf_view', shelf_name='to-download') }}">to-download</a></li>
+    <li><a href="{{ url_for('shelf_view', shelf_name='to-read') }}">to-read</a></li>
+    <li><a href="{{ url_for('shelf_view', shelf_name='read') }}">read</a></li>
+    <li><a href="{{ url_for('shelf_view', shelf_name='owned') }}">owned</a></li>
   </ul>
-  <script>
-    async function fetchShelf(s){
-      try{
-        const res = await fetch('/sync', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({shelf:s})});
-        const js = await res.json();
-        alert(js.message || 'Started');
-      }catch(e){ alert('Fail:'+e) }
-    }
-  </script>
 {% endblock %}

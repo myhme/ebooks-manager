@@ -32,6 +32,17 @@ Key goals of the recent refactor:
 │ ├── webui/
 │ │ ├── app.py # Flask web UI backend (serves pages)
 │ │ └── templates/ # Jinja templates (layout, shelf_view, downloads, status)
+│ │	│   ├── layout.html
+│ │	│   ├── shelf_view.html
+│ │	│   ├── downloads.html
+│ │	│   ├── shelves.html
+│ │	│   ├── status.html
+│ │	│   └── sync.html
+│ │	└── static/
+│ │		├── css/
+│ │		│   └── style.css
+│ │		└── js/
+│ │			└── app.js
 │ ├── api/
 │ │ └── cwa_client.py # Optional: CWA client wrapper (if present)
 │ └── ... # other modules (backend, downloader, models, logger)
