@@ -11,7 +11,6 @@
 #   2. Run it: ./setup_project.sh
 # ==============================================================================
 
-# Exit immediately if a command exits with a non-zero status.
 set -e
 
 PROJECT_NAME="my_project"
@@ -21,8 +20,39 @@ mkdir -p "$PROJECT_NAME"
 cd "$PROJECT_NAME"
 
 echo "Creating directories..."
-
 mkdir -p "/mnt/data/build/ebooks-manager"
+mkdir -p "data"
+mkdir -p "data/cache"
+mkdir -p "data/cache/search_results"
+mkdir -p "data/cache/search_results/cwa_book_downloader"
+mkdir -p "data/cache/logins"
+mkdir -p "data/cache/logins/cwa_book_downloader"
+mkdir -p "data/cache/logins/cwa"
+mkdir -p "data/cache/logins/goodreads"
+mkdir -p "data/cache/webpages"
+mkdir -p "data/cache/webpages/storybook"
+mkdir -p "data/cache/webpages/storybook/others"
+mkdir -p "data/cache/webpages/storybook/ebooks"
+mkdir -p "data/cache/webpages/hardcover"
+mkdir -p "data/cache/webpages/hardcover/others"
+mkdir -p "data/cache/webpages/hardcover/ebooks"
+mkdir -p "data/cache/webpages/goodreads"
+mkdir -p "data/cache/webpages/goodreads/others"
+mkdir -p "data/cache/webpages/goodreads/ebooks"
+mkdir -p "data/databases"
+mkdir -p "scripts"
+mkdir -p "config"
+mkdir -p "logs"
+mkdir -p "logs/screenshots"
+mkdir -p "src"
+mkdir -p "src/api"
+mkdir -p "src/scrapers"
+mkdir -p "src/webui"
+mkdir -p "src/webui/templates"
+mkdir -p "src/webui/static"
+mkdir -p "src/webui/static/css"
+mkdir -p "src/webui/static/js"
+mkdir -p "src/utils"
 
 echo "Creating file: .env.example"
 cat << 'EOF' > ".env.example"
@@ -47,28 +77,7 @@ FLASK_PORT=5002
 DRY_RUN=yes
 PYTHONUNBUFFERED=1
 WEBPAGE_CACHE_DAYS=30
-
 EOF
-mkdir -p "data"
-mkdir -p "data/cache"
-mkdir -p "data/cache/search_results"
-mkdir -p "data/cache/search_results/cwa_book_downloader"
-mkdir -p "data/cache/logins"
-mkdir -p "data/cache/logins/cwa_book_downloader"
-mkdir -p "data/cache/logins/cwa"
-mkdir -p "data/cache/logins/goodreads"
-mkdir -p "data/cache/webpages"
-mkdir -p "data/cache/webpages/storybook"
-mkdir -p "data/cache/webpages/storybook/others"
-mkdir -p "data/cache/webpages/storybook/ebooks"
-mkdir -p "data/cache/webpages/hardcover"
-mkdir -p "data/cache/webpages/hardcover/others"
-mkdir -p "data/cache/webpages/hardcover/ebooks"
-mkdir -p "data/cache/webpages/goodreads"
-mkdir -p "data/cache/webpages/goodreads/others"
-mkdir -p "data/cache/webpages/goodreads/ebooks"
-mkdir -p "data/databases"
-mkdir -p "scripts"
 
 echo "Creating file: scripts/entrypoint.sh"
 cat << 'EOF' > "scripts/entrypoint.sh"
@@ -89,14 +98,16 @@ if [ ! -f /app/config/config.json ]; then
     exit 1
 fi
 
-# Run Gunicorn in the background with logging
-echo "Starting Gunicorn..."
-gunicorn --bind 0.0.0.0:5002 --workers 1 --threads 2 --timeout 120 --log-file /app/logs/gunicorn.log src.webui.app:app &
+# Start Uvicorn WebUI in background
+echo "Starting Uvicorn..."
+uvicorn src.webui.app:app \
+    --host 0.0.0.0 \
+    --port 5002 \
+    --workers ${UVICORN_WORKERS:-2} &
 
-# Run the scheduler in the foreground
+# Start scheduler in foreground
 echo "Starting scheduler..."
 exec python3 /app/src/job_runner.py
-
 EOF
 
 echo "Creating file: scripts/script.sh"
@@ -106,9 +117,7 @@ set -e
 
 # Example script for running the project or performing maintenance tasks
 exec python3 /app/src/main.py
-
 EOF
-mkdir -p "config"
 
 echo "Creating file: config/config.json.template"
 cat << 'EOF' > "config/config.json.template"
@@ -124,44 +133,69 @@ cat << 'EOF' > "config/config.json.template"
     "history_file": "/app/logs/history.json",
     "cache_dir": "/app/data/cache",
     "goodreads_per_page": 100
-}
-EOF
-mkdir -p "logs"
+}EOF
 
 echo "Creating file: logs/sync_log.txt"
 cat << 'EOF' > "logs/sync_log.txt"
-
 EOF
 
 echo "Creating file: logs/history.json"
 cat << 'EOF' > "logs/history.json"
-
 EOF
-mkdir -p "logs/screenshots"
+
+echo "Creating file: LICENSE"
+cat << 'EOF' > "LICENSE"
+MIT License
+
+Copyright (c) 2025 [Your Name]
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+EOF
 
 echo "Creating file: requirements.txt"
 cat << 'EOF' > "requirements.txt"
-requests==2.31.0
-beautifulsoup4==4.12.2
-flask==3.0.3
-selenium==4.23.1
-gunicorn==20.1.0
-apscheduler==3.10.4
-Pillow==10.1.0
+fastapi
+uvicorn[standard]
+httpx
+jinja2
+python-multipart
+# Keep existing scraping/DB deps
+beautifulsoup4
+lxml
+requests
+selenium
+sqlite-utils
 EOF
 
 echo "Creating file: Dockerfile"
 cat << 'EOF' > "Dockerfile"
-FROM python:3.9-slim
+# syntax=docker/dockerfile:1
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# Set up non-root user
+# Create non-root user
 RUN useradd -m -r -u 1000 appuser && \
     mkdir -p /home/appuser/.cache && \
     chown -R appuser:appuser /app /home/appuser
 
-# Install essential tools and ARM64-compatible Chromium
+# Install Chromium + dependencies for Selenium
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     gnupg \
@@ -195,28 +229,32 @@ RUN if [ ! -f /usr/bin/chromedriver ]; then echo "ChromeDriver not found"; exit 
 
 # Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt && \
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt && \
     pip cache purge
 
-# Copy application code
+# Copy app code
 COPY . .
-# Ensure ownership of all app files and logs
 RUN chown -R appuser:appuser /app /home/appuser && \
     mkdir -p /app/logs && \
     chown appuser:appuser /app/logs
 
-# Set environment variables
+# Environment vars
 ENV PYTHONPATH=/app \
     CHROMEDRIVER_PATH=/usr/bin/chromedriver \
-    PATH="/home/appuser/.local/bin:$PATH"
+    PATH="/home/appuser/.local/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
-# Switch to non-root user
+# Switch to non-root
 USER appuser
 
-# Entry point
-CMD ["/app/scripts/entrypoint.sh"]
+# Expose WebUI port
+EXPOSE 5002
+
+# Entrypoint (Uvicorn)
+ENTRYPOINT ["/app/scripts/entrypoint.sh"]
 EOF
-mkdir -p "src"
 
 echo "Creating file: src/bootstrap.py"
 cat << 'EOF' > "src/bootstrap.py"
@@ -225,7 +263,18 @@ from pathlib import Path
 import json
 import sys
 
-REQUIRED_CONFIG_KEYS = ['goodreads_username', 'goodreads_password', 'goodreads_user_id', 'cwa_api_url', 'cwa_username', 'cwa_password', 'database_path', 'log_file', 'history_file', 'cache_dir']
+REQUIRED_CONFIG_KEYS = [
+    'goodreads_username',
+    'goodreads_password',
+    'goodreads_user_id',
+    'cwa_api_url',
+    'cwa_username',
+    'cwa_password',
+    'database_path',
+    'log_file',
+    'history_file',
+    'cache_dir'
+]
 
 def check_and_create_app_files():
     """
@@ -279,7 +328,8 @@ def check_and_create_app_files():
                     "goodreads_username": "your_goodreads_email",
                     "goodreads_password": "your_goodreads_password",
                     "goodreads_user_id": "your_goodreads_user_id",
-                    "cwa_api_url": "http://calibre-web:8084/request/api",
+                    # 🔹 Updated default: docker-compose service name + port
+                    "cwa_api_url": "http://cwa-downloader:5000/request/api",
                     "cwa_username": "your_cwa_username",
                     "cwa_password": "your_cwa_password",
                     "database_path": "/app/data/databases/goodreads.db",
@@ -289,17 +339,38 @@ def check_and_create_app_files():
                 }
                 config_file.write_text(json.dumps(default_config, indent=2))
 
-        # Validate config
+        # --- Load config ---
         try:
             with open(config_file, 'r') as f:
                 config = json.load(f)
-            missing_keys = [key for key in REQUIRED_CONFIG_KEYS if key not in config]
-            if missing_keys:
-                raise ValueError(f"Config missing required keys: {missing_keys}")
-            print("Config validated successfully.")
-        except (json.JSONDecodeError, ValueError) as e:
-            print(f"Invalid config: {e}. Please fix '{config_file}'.")
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            print(f"Invalid or missing config: {e}. Please fix '{config_file}'.")
             sys.exit(1)
+
+        # --- Apply ENV overrides ---
+        overrides = {
+            "cwa_api_url": os.getenv("CWA_API_URL"),
+            "cwa_username": os.getenv("CWA_USERNAME"),
+            "cwa_password": os.getenv("CWA_PASSWORD"),
+            "database_path": os.getenv("DATABASE_PATH"),
+        }
+        changed = False
+        for key, value in overrides.items():
+            if value:
+                config[key] = value
+                changed = True
+                print(f"Overriding config[{key}] with environment variable.")
+
+        if changed:
+            config_file.write_text(json.dumps(config, indent=2))
+            print(f"Config updated with environment overrides: {config_file}")
+
+        # --- Validate config ---
+        missing_keys = [key for key in REQUIRED_CONFIG_KEYS if key not in config]
+        if missing_keys:
+            print(f"Config missing required keys: {missing_keys}")
+            sys.exit(1)
+        print("Config validated successfully.")
 
         # --- Log and History Files ---
         log_file = log_dir / 'sync_log.txt'
@@ -319,9 +390,7 @@ def check_and_create_app_files():
 
 if __name__ == "__main__":
     check_and_create_app_files()
-
 EOF
-mkdir -p "src/api"
 
 echo "Creating file: src/api/cwa_client.py"
 cat << 'EOF' > "src/api/cwa_client.py"
@@ -383,12 +452,10 @@ class CWAClient:
                 logging.error(f"Status check failed: {e}", exc_info=True)
                 time.sleep(wait_seconds)
         return False
-
 EOF
 
 echo "Creating file: src/api/__init__.py"
 cat << 'EOF' > "src/api/__init__.py"
-
 EOF
 
 echo "Creating file: src/sync_logic.py"
@@ -452,7 +519,6 @@ def orchestrate_sync(shelves=None):
                     db.add_history(action='download', book_id=b['goodreads_id'], title=b.get('title'), status='error')
         except Exception:
             LOG.exception("Sync for shelf %s failed", shelf)
-
 EOF
 
 echo "Creating file: src/main.py"
@@ -470,9 +536,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 EOF
-mkdir -p "src/scrapers"
 
 echo "Creating file: src/scrapers/hardcover.py"
 cat << 'EOF' > "src/scrapers/hardcover.py"
@@ -483,7 +547,6 @@ class HardcoverScraper:
 
     def sync(self):
         pass
-
 EOF
 
 echo "Creating file: src/scrapers/storygraph.py"
@@ -495,7 +558,6 @@ class StorygraphScraper:
 
     def sync(self):
         pass
-
 EOF
 
 echo "Creating file: src/scrapers/goodreads.py"
@@ -1164,492 +1226,278 @@ class GoodreadsScraper:
                 continue
 
         return books, has_next
-
 EOF
 
 echo "Creating file: src/scrapers/__init__.py"
 cat << 'EOF' > "src/scrapers/__init__.py"
-
 EOF
-mkdir -p "src/webui"
 
 echo "Creating file: src/webui/app.py"
 cat << 'EOF' > "src/webui/app.py"
 # src/webui/app.py
-import os
+import asyncio
 import json
 import logging
-import threading
-import time
-from functools import wraps
+import os
 from pathlib import Path
-from typing import Tuple, Union
+from typing import Any, Dict, Optional
 
-import difflib
-import requests
-from flask import Flask, request, jsonify, render_template, send_from_directory, redirect, url_for, current_app
-from werkzeug.middleware.proxy_fix import ProxyFix
-from werkzeug.wrappers import Response
-from werkzeug.security import check_password_hash
+import httpx
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException, Depends
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
 
-# project imports (adjust if your import paths differ)
-try:
-    from src.utils.database import Database
-    from src.scrapers.goodreads import GoodreadsScraper
-except Exception:
-    from utils.database import Database
-    from scrapers.goodreads import GoodreadsScraper
+from src.utils.database import Database
+from src.scrapers.goodreads import GoodreadsScraper
 
-LOG = logging.getLogger(__name__)
+# Logging
+LOG = logging.getLogger("webui")
 logging.basicConfig(level=logging.INFO)
 
-app = Flask(__name__, static_folder='static', template_folder='templates')
-app.wsgi_app = ProxyFix(app.wsgi_app)
-app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+# FastAPI app
+app = FastAPI(
+    title="Ebooks Manager WebUI",
+    middleware=[
+        Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+    ],
+)
 
-# load config from file if present
-CONFIG_PATH = os.getenv('APP_CONFIG_JSON', 'config.json')
-if os.path.exists(CONFIG_PATH):
+BASE_DIR = Path(__file__).resolve().parent
+TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+STATIC_DIR = BASE_DIR / "static"
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# Config loader
+CONFIG_PATH = Path(os.getenv("APP_CONFIG_JSON", "/app/config/config.json"))
+if not CONFIG_PATH.exists():
+    alt = Path.cwd() / "config" / "config.json"
+    if alt.exists():
+        CONFIG_PATH = alt
+
+def load_config() -> Dict[str, Any]:
     try:
-        with open(CONFIG_PATH, 'r') as f:
-            cfg = json.load(f)
-            app.config.update(cfg)
-            LOG.info("Loaded config from %s", CONFIG_PATH)
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
-        LOG.exception("Failed to load config.json")
-else:
-    LOG.info("No config.json found at %s; using env vars", CONFIG_PATH)
+        return {k.lower(): v for k, v in os.environ.items()}
 
-def get_config(key, default=None):
-    v = app.config.get(key)
-    if v is None:
-        v = os.getenv(key.upper(), default)
-    return v
+# DB setup
+DB_PATH = (
+    os.getenv("DATABASE_PATH")
+    or os.getenv("database_path")
+    or load_config().get("database_path")
+    or "/app/data/databases/goodreads.db"
+)
+_db = Database(DB_PATH)
 
-# Database init
-DB_PATH = get_config('database_path') or get_config('DATABASE_PATH') or '/app/data/databases/goodreads.db'
-db = Database(DB_PATH)
+# Async http client
+http_client = httpx.AsyncClient(timeout=30.0)
 
-# CWA backend config helper
-def _get_cwa_config() -> Tuple[Union[str,None], Union[str,None], Union[str,None]]:
-    base = app.config.get('cwa_api_url') or os.getenv('CWA_API_URL') or os.getenv('DOWNLOAD_BACKEND_URL') or app.config.get('download_backend_url')
-    username = app.config.get('cwa_username') or os.getenv('CWA_USERNAME')
-    password = app.config.get('cwa_password') or os.getenv('CWA_PASSWORD')
-    if base and base.endswith('/'):
-        base = base[:-1]
-    return base, username, password
+# Queue + ws connections
+task_queue: "asyncio.Queue[dict]" = asyncio.Queue()
+ws_connections: set[WebSocket] = set()
 
-def _call_cwa_api(path: str, method: str = 'GET', params=None, json_body=None, timeout=12):
-    base, username, password = _get_cwa_config()
+async def queue_worker():
+    LOG.info("Queue worker started")
+    while True:
+        job = await task_queue.get()
+        try:
+            if job.get("type") == "queue_candidate":
+                await call_cwa_api("/api/download", "POST", json_body={"id": job["id"], "priority": job.get("priority", 0)})
+                await broadcast({"event": "queued", "candidate_id": job["id"]})
+            elif job.get("type") == "sync_shelf":
+                cfg = load_config()
+                cfg["cache_dir"] = cfg.get("cache_dir", "/app/data/cache")
+                gs = GoodreadsScraper(cfg)
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, gs.get_goodreads_books_from_shelf, job["shelf"], False, 200)
+                await broadcast({"event": "sync_done", "shelf": job["shelf"]})
+        except Exception:
+            LOG.exception("Worker error")
+        finally:
+            task_queue.task_done()
+
+@app.on_event("startup")
+async def on_startup():
+    app.state.worker_task = asyncio.create_task(queue_worker())
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    app.state.worker_task.cancel()
+    await http_client.aclose()
+
+# --- Helpers ---
+def _get_cwa_config():
+    cfg = load_config()
+    base = cfg.get("cwa_api_url") or os.getenv("CWA_API_URL")
+    user = cfg.get("cwa_username") or os.getenv("CWA_USERNAME")
+    pw = cfg.get("cwa_password") or os.getenv("CWA_PASSWORD")
+
     if not base:
-        return False, 500, "CWA backend not configured (cwa_api_url)"
+        LOG.error("❌ No cwa_api_url configured in config.json or env. Backend calls will fail.")
+        return None, user, pw
+
+    LOG.info("✅ Using CWA backend at %s", base)
+    return base.rstrip("/"), user, pw
+
+
+async def call_cwa_api(
+    path: str,
+    method: str = "GET",
+    params: Optional[dict] = None,
+    json_body: Optional[dict] = None,
+    timeout: float = 10.0,
+):
+    base, user, pw = _get_cwa_config()
+    if not base:
+        return False, 500, "No backend configured"
+
     url = f"{base}/{path.lstrip('/')}"
-    auth = (username, password) if username and password else None
+    LOG.debug("➡️ Calling backend %s %s", method, url)
+
     try:
-        r = requests.request(method, url, params=params, json=json_body, auth=auth, timeout=timeout)
-    except requests.RequestException as e:
-        LOG.error("Backend HTTP call failed %s %s", url, e)
-        return False, 502, f"Backend unreachable: {repr(e)}"
-    try:
-        ct = r.headers.get('Content-Type','')
-        if 'application/json' in ct or (r.text and (r.text.strip().startswith('{') or r.text.strip().startswith('['))):
+        r = await http_client.request(
+            method,
+            url,
+            params=params,
+            json=json_body,
+            auth=(user, pw) if user and pw else None,
+            timeout=timeout,
+        )
+        LOG.debug("⬅️ Response %s %s", r.status_code, r.headers.get("content-type"))
+
+        if "application/json" in r.headers.get("content-type", ""):
             return True, r.status_code, r.json()
-        else:
-            return True, r.status_code, r.text
-    except Exception:
         return True, r.status_code, r.text
 
-# Authentication - reuse CWA calibre-web DB if configured
-CWA_DB_PATH = get_config('CWA_DB_PATH') or get_config('cwa_db_path') or None
-def authenticate() -> bool:
-    if not CWA_DB_PATH:
+    except httpx.RequestError as e:
+        LOG.error("❌ Backend call failed: %s", e)
+        return False, 502, str(e)
+
+# --- Admin Auth ---
+security = HTTPBasic()
+ADMIN_USER = os.getenv("ADMIN_USER")
+ADMIN_PASS = os.getenv("ADMIN_PASS")
+
+def check_basic_auth(creds: HTTPBasicCredentials = Depends(security)):
+    if not ADMIN_USER or not ADMIN_PASS:
         return True
-    if not request.authorization:
-        return False
-    username = request.authorization.get('username')
-    password = request.authorization.get('password')
-    import sqlite3
-    try:
-        db_uri = f"file:{CWA_DB_PATH}?mode=ro&immutable=1"
-        conn = sqlite3.connect(db_uri, uri=True)
-        cur = conn.cursor()
-        cur.execute("SELECT password FROM user WHERE name = ?", (username,))
-        row = cur.fetchone()
-        conn.close()
-        if not row or not row[0] or not check_password_hash(row[0], password):
-            LOG.warning("Auth failed for user %s", username)
-            return False
-    except Exception:
-        LOG.exception("Auth check failed")
-        return False
-    LOG.info("Authentication successful for %s", username)
-    return True
+    if creds.username == ADMIN_USER and creds.password == ADMIN_PASS:
+        return True
+    raise HTTPException(401, "Unauthorized")
 
-def login_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if not authenticate():
-            return Response(response="Unauthorized", status=401, headers={"WWW-Authenticate": 'Basic realm="Login Required"'})
-        return f(*args, **kwargs)
-    return decorated
+# --- Routes ---
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    return RedirectResponse("/shelf/to-download")
 
-# Serve cover images saved by scraper
-@app.route('/covers/<path:filename>')
-@login_required
-def serve_cover(filename):
-    covers_dir = Path(get_config('cache_dir', '/app/data/cache')) / 'covers'
-    if not covers_dir.exists():
-        return "Not Found", 404
-    return send_from_directory(str(covers_dir), filename)
+@app.get("/shelf/{shelf}", response_class=HTMLResponse)
+async def shelf_view(request: Request, shelf: str, page: int = 1, per_page: int = 30):
+    loop = asyncio.get_running_loop()
+    books = await loop.run_in_executor(None, _db.get_books_by_shelf, shelf, per_page, (page-1)*per_page)
+    total = await loop.run_in_executor(None, _db.count_books_by_shelf, shelf)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    return TEMPLATES.TemplateResponse(
+        "shelf_view.html",
+        {"request": request, "shelf_name": shelf, "books": books, "page": page, "total_pages": total_pages},
+    )
 
-# Basic pages (index, shelves, shelf view, downloads)
-@app.route('/')
-@login_required
-def index():
-    return redirect(url_for('shelf_view', shelf_name='to-download'))
+@app.get("/covers/{path:path}")
+async def serve_cover(path: str, auth: bool = Depends(check_basic_auth)):
+    covers_dir = Path(load_config().get("cache_dir", "/app/data/cache")) / "covers"
+    f = covers_dir / path
+    if not f.exists():
+        raise HTTPException(404)
+    return FileResponse(str(f))
 
-@app.route('/shelves')
-@login_required
-def shelves_page():
-    return render_template('shelves.html')
+@app.post("/api/search_and_queue")
+async def api_search_and_queue(payload: dict):
+    title = payload.get("title", "")
+    author = payload.get("author", "")
+    isbn = payload.get("isbn", payload.get("isbn13", ""))
+    goodreads_id = str(payload.get("goodreads_id") or "")
+    query = isbn if isbn else f"{title} {author}".strip()
 
-@app.route('/shelf/<shelf_name>')
-@login_required
-def shelf_view(shelf_name):
-    try:
-        per_page = int(request.args.get('per_page', get_config('webui_per_page', 30)))
-    except Exception:
-        per_page = 30
-    try:
-        page = int(request.args.get('page', 1))
-    except Exception:
-        page = 1
-    offset = (page - 1) * per_page
+    params = {"query": query}
+    if title: params["title"] = title
+    if author: params["author"] = author
+    if isbn: params["isbn"] = isbn
 
-    try:
-        books = db.get_books_by_shelf(shelf_name, limit=per_page, offset=offset)
-    except TypeError:
-        LOG.warning("Database.get_books_by_shelf does not accept offset; calling without")
-        books = db.get_books_by_shelf(shelf_name, limit=per_page)
-
-    try:
-        total = db.count_books_by_shelf(shelf_name)
-    except Exception:
-        total = len(books)
-    total_pages = max(1, (int(total) + per_page - 1) // per_page)
-
-    return render_template('shelf_view.html',
-                           shelf_name=shelf_name,
-                           books=books,
-                           per_page=per_page,
-                           page=page,
-                           total_pages=total_pages,
-                           offset=offset,
-                           config=app.config)
-
-@app.route('/downloads')
-@login_required
-def downloads_page():
-    return render_template('downloads.html')
-
-@app.route('/status')
-@login_required
-def status_page():
-    return render_template('status.html')
-
-@app.route('/sync')
-@login_required
-def sync_page():
-    return render_template('sync.html')
-
-# Existing proxy endpoints (status, active, download, cancel)
-@app.route('/api/status_proxy', methods=['GET'])
-@login_required
-def api_status_proxy():
-    ok, code, body = _call_cwa_api('/api/status', 'GET')
+    ok, _, resp = await call_cwa_api("/api/search", "GET", params=params)
     if not ok:
-        return jsonify({"error": body}), 502
-    return jsonify(body), 200
+        raise HTTPException(502, "Backend search failed")
 
-@app.route('/api/active_proxy', methods=['GET'])
-@login_required
-def api_active_proxy():
-    ok, code, body = _call_cwa_api('/api/downloads/active', 'GET')
-    if not ok:
-        return jsonify({"error": body}), 502
-    return jsonify(body), 200
-
-@app.route('/api/download_proxy', methods=['POST'])
-@login_required
-def api_download_proxy():
-    payload = request.get_json(silent=True) or request.values.to_dict()
-    if not payload:
-        return jsonify({"error": "No payload"}), 400
-    book_id = payload.get('id') or payload.get('book_id')
-    if not book_id:
-        return jsonify({"error": "No id provided"}), 400
-    priority = payload.get('priority', 0)
-    ok, code, body = _call_cwa_api('/api/download', 'GET', params={'id': book_id, 'priority': priority})
-    if not ok:
-        ok2, code2, body2 = _call_cwa_api('/api/download', 'POST', json_body={'id': book_id, 'priority': priority})
-        if not ok2:
-            return jsonify({"error": body2}), 502
-        return jsonify(body2), code2
-    return jsonify(body), code
-
-@app.route('/api/download/<book_id>/cancel_proxy', methods=['DELETE'])
-@login_required
-def api_cancel_download_proxy(book_id):
-    ok, code, body = _call_cwa_api(f'/api/download/{book_id}/cancel', 'DELETE')
-    if ok and 200 <= code < 300:
-        return jsonify(body if isinstance(body, dict) else {"status":"cancelled","book_id":book_id}), code
-    # try alternate path
-    ok2, code2, body2 = _call_cwa_api(f'/api/downloads/{book_id}/cancel', 'DELETE')
-    if ok2 and 200 <= code2 < 300:
-        return jsonify(body2), code2
-    return jsonify({"error":"Failed to cancel; backend unreachable or endpoint not supported"}), 502
-
-# Helper: string normalization
-def _normalize_str(s: str):
-    if not s:
-        return ''
-    s = s.lower()
-    s = re_clean = ''.join(ch for ch in s if ch.isalnum() or ch.isspace()).strip()
-    return re_clean
-
-# New: search+save endpoint + auto-queue best match
-@app.route('/api/search_and_queue', methods=['POST'])
-@login_required
-def api_search_and_queue():
-    """
-    Accepts JSON:
-      { goodreads_id, title, author, isbn, isbn13 }
-    Calls CWA backend /api/search (GET) with sensible params,
-    saves search request + response JSON to cache_dir/search_requests/,
-    scores candidates, auto-queues if confident, and returns JSON
-    { queued: true, candidate: {...} } or { candidates: [...] }.
-    """
-    payload = request.get_json(silent=True) or {}
-    if not payload:
-        return jsonify({"error":"No payload"}), 400
-
-    title = payload.get('title') or ''
-    author = payload.get('author') or ''
-    isbn = payload.get('isbn') or payload.get('isbn13') or ''
-    goodreads_id = str(payload.get('goodreads_id') or '')
-
-    # build query param - prefer isbn if present else "title author"
-    query = isbn if isbn else (title + ' ' + author).strip()
-    params = {'query': query}
-    if title:
-        params['title'] = title
-    if author:
-        params['author'] = author
-    if isbn:
-        params['isbn'] = isbn
-
-    ok, status_code, resp = _call_cwa_api('/api/search', 'GET', params=params)
-    timestamp = int(time.time())
-    cache_dir = Path(get_config('cache_dir', '/app/data/cache'))
-    search_dir = cache_dir / 'search_requests'
-    search_dir.mkdir(parents=True, exist_ok=True)
-    saved = {
-        'timestamp': timestamp,
-        'goodreads_id': goodreads_id,
-        'query': params,
-        'backend_response': resp if ok else {"error": resp}
-    }
-    fname = search_dir / f"{timestamp}_{goodreads_id or 'noid'}.json"
-    try:
-        with open(fname, 'w', encoding='utf-8') as f:
-            json.dump(saved, f, ensure_ascii=False, indent=2)
-    except Exception:
-        LOG.exception("Failed to save search request JSON")
-
-    if not ok:
-        return jsonify({"error": "Backend search failed", "detail": resp}), 502
-
-    # resp hopefully is list of candidates (books)
-    candidates = resp if isinstance(resp, list) else (resp.get('books') if isinstance(resp, dict) else None)
+    candidates = resp if isinstance(resp, list) else resp.get("books", [])
     if not candidates:
-        # if response is non-list, try to return as-is
-        return jsonify({"error":"No candidates", "raw": resp}), 200
+        return {"error": "No candidates"}
 
-    # score candidates
-    def score_candidate(cand):
-        # cand expected to have .title and .author and maybe isbn / id
+    def score(c: dict) -> int:
         s = 0
-        ct = cand.get('title') or cand.get('Title') or ''
-        ca = cand.get('author') or cand.get('Author') or ''
-        c_isbns = []
-        for k in ('isbn','isbn13','ISBN','ISBN13'):
-            v = cand.get(k)
-            if v:
-                if isinstance(v, list):
-                    c_isbns.extend(v)
-                else:
-                    c_isbns.append(str(v))
-        # ISBN exact match high boost
-        if isbn and any(isbn.replace('-', '') == c.replace('-', '') for c in c_isbns):
+        if isbn and isbn.replace("-", "") in str(c.get("isbn", "")).replace("-", ""):
             s += 2000
-        # exact title match
-        if title and ct and _normalize_str(title) == _normalize_str(ct):
+        if title and title.lower() == (c.get("title") or "").lower():
             s += 1000
-        # exact author contains
-        if author and ca and _normalize_str(author) in _normalize_str(ca):
+        if author and author.lower() in (c.get("author") or "").lower():
             s += 400
-        # fuzzy title ratio
-        try:
-            r = difflib.SequenceMatcher(None, _normalize_str(title), _normalize_str(ct)).ratio() if title and ct else 0.0
-            s += int(r * 300)
-        except Exception:
-            pass
-        # fuzzy author ratio
-        try:
-            r2 = difflib.SequenceMatcher(None, _normalize_str(author), _normalize_str(ca)).ratio() if author and ca else 0.0
-            s += int(r2 * 150)
-        except Exception:
-            pass
-        # slight preference for common ebook formats if present
-        fmt = (cand.get('format') or '').lower()
-        if fmt in ('epub','mobi','azw3','pdf'):
-            s += 20
         return s
 
-    scored = []
-    for c in candidates:
-        try:
-            sc = score_candidate(c)
-            scored.append((sc, c))
-        except Exception:
-            LOG.exception("Scoring candidate failed")
-    scored.sort(key=lambda x: x[0], reverse=True)
+    best_score, best_cand = max(((score(c), c) for c in candidates), key=lambda t: t[0])
+    if best_score >= int(load_config().get("auto_queue_score_threshold", 600)):
+        cand_id = best_cand.get("id") or best_cand.get("md5")
+        if cand_id:
+            await task_queue.put({"type": "queue_candidate", "id": cand_id, "priority": 0})
+            return {"queued": True, "candidate": best_cand}
+    return {"queued": False, "candidates": candidates[:6]}
 
-    # threshold to auto-queue
-    best_score, best_candidate = scored[0]
-    LOG.info("Top candidate score=%s for gr=%s", best_score, goodreads_id)
-    # Save scored candidate list for auditing
-    cand_dir = cache_dir / 'search_candidates'
-    cand_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        with open(cand_dir / f"{timestamp}_{goodreads_id or 'noid'}.json", 'w', encoding='utf-8') as f:
-            json.dump({'scored': [{'score': s, 'candidate': c} for s, c in scored]}, f, ensure_ascii=False, indent=2)
-    except Exception:
-        LOG.exception("Failed to save candidates JSON")
-
-    # If confident (score big) auto queue
-    AUTO_THRESHOLD = app.config.get('auto_queue_score_threshold') or 600
-    if best_score >= int(AUTO_THRESHOLD):
-        # attempt to queue by calling download
-        cand_id = best_candidate.get('id') or best_candidate.get('md5') or best_candidate.get('ID') or best_candidate.get('Id')
-        if not cand_id:
-            return jsonify({"error":"No backend id for top candidate", "candidate": best_candidate}), 200
-        ok2, code2, body2 = _call_cwa_api('/api/download', 'GET', params={'id': cand_id, 'priority': 0})
-        if not ok2:
-            ok3, code3, body3 = _call_cwa_api('/api/download', 'POST', json_body={'id': cand_id, 'priority': 0})
-            if not ok3:
-                return jsonify({"error":"Failed to queue candidate", "detail": body3}), 502
-            queued_info = body3
-        else:
-            queued_info = body2
-        # save selection
-        sel_dir = cache_dir / 'selected_candidates'
-        sel_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            with open(sel_dir / f"{timestamp}_{goodreads_id or 'noid'}.json", 'w', encoding='utf-8') as f:
-                json.dump({'selected': best_candidate, 'queued_result': queued_info}, f, ensure_ascii=False, indent=2)
-        except Exception:
-            LOG.exception("Failed to save selected candidate JSON")
-        return jsonify({"queued": True, "candidate": best_candidate, "queued_result": queued_info}), 200
-
-    # not confident: return top N candidates for manual selection
-    topN = [c for s, c in scored[:6]]
-    return jsonify({"queued": False, "candidates": topN, "reason": "low_confidence", "top_score": best_score}), 200
-
-
-@app.route('/search')
-@login_required
-def manual_search_page():
-    return render_template('search.html')
-
-@app.route('/api/manual_search', methods=['POST'])
-@login_required
-def api_manual_search():
-    payload = request.get_json(silent=True) or {}
-    query = payload.get('query')
-    if not query:
-        return jsonify({"error":"query required"}), 400
-
-    # throttle: avoid spamming backend
-    time.sleep(1.0)  # simple delay, could use token-bucket limiter
-
-    # retry up to 3 times
-    last_err = None
-    for attempt in range(3):
-        ok, code, resp = _call_cwa_api('/api/search', 'GET', params={'query': query})
-        if ok and code == 200:
-            candidates = resp if isinstance(resp, list) else resp.get('books', [])
-            return jsonify({"candidates": candidates})
-        last_err = resp
-        time.sleep(2**attempt)  # exponential backoff
-    return jsonify({"error":"backend search failed","detail":last_err}), 502
-
-
-
-# queue from candidate endpoint (manual choose)
-@app.route('/api/queue_from_candidate', methods=['POST'])
-@login_required
-def api_queue_from_candidate():
-    payload = request.get_json(silent=True) or {}
-    cand_id = payload.get('candidate_id') or payload.get('id')
+@app.post("/api/queue_from_candidate")
+async def api_queue_from_candidate(payload: dict):
+    cand_id = payload.get("candidate_id") or payload.get("id")
     if not cand_id:
-        return jsonify({"error":"candidate_id is required"}), 400
-    ok, code, body = _call_cwa_api('/api/download', 'GET', params={'id': cand_id, 'priority': payload.get('priority', 0)})
-    if not ok:
-        ok2, code2, body2 = _call_cwa_api('/api/download', 'POST', json_body={'id': cand_id, 'priority': payload.get('priority', 0)})
-        if not ok2:
-            return jsonify({"error": body2}), 502
-        return jsonify(body2), code2
-    return jsonify(body), code
+        raise HTTPException(400, "candidate_id required")
+    await task_queue.put({"type": "queue_candidate", "id": cand_id, "priority": payload.get("priority", 0)})
+    return {"queued": True, "id": cand_id}
 
-# spawn background sync (same as earlier)
-def _spawn_background_sync(shelf_name: str):
-    def run():
+@app.post("/sync/{shelf}")
+async def trigger_sync(shelf: str):
+    await task_queue.put({"type": "sync_shelf", "shelf": shelf})
+    return {"status": "sync_started", "shelf": shelf}
+
+# --- WebSocket ---
+@app.websocket("/ws/updates")
+async def ws_updates(ws: WebSocket):
+    await ws.accept()
+    ws_connections.add(ws)
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        ws_connections.discard(ws)
+
+async def broadcast(message: dict):
+    dead = []
+    for ws in ws_connections:
         try:
-            cfg = app.config.copy()
-            cfg['cache_dir'] = cfg.get('cache_dir') or get_config('cache_dir', '/app/data/cache')
-            cfg['goodreads_per_page'] = cfg.get('goodreads_per_page') or get_config('goodreads_per_page', get_config('GOODREADS_PER_PAGE', 100))
-            gs = GoodreadsScraper(cfg)
-            gs.get_goodreads_books_from_shelf(shelf_name=shelf_name, fetch_details=False, max_pages=200)
-            LOG.info("Background sync finished for shelf %s", shelf_name)
+            await ws.send_json(message)
         except Exception:
-            LOG.exception("Background sync failed")
-    t = threading.Thread(target=run, daemon=True)
-    t.start()
-    return t
+            dead.append(ws)
+    for ws in dead:
+        ws_connections.discard(ws)
 
-@app.route('/sync/<shelf_name>', methods=['POST'])
-@login_required
-def trigger_sync(shelf_name):
-    _spawn_background_sync(shelf_name)
-    return jsonify({"status":"sync_started", "shelf": shelf_name})
+# --- Config admin ---
+@app.get("/admin/config")
+async def get_config(auth: bool = Depends(check_basic_auth)):
+    return load_config()
 
-# small endpoint to test backend reachability
-@app.route('/api/backend_info')
-@login_required
-def backend_info():
-    base, user, pw = _get_cwa_config()
-    ok, code, body = _call_cwa_api('/api/status', 'GET')
-    if not ok:
-        return jsonify({"ok": False, "error": body, "base": base}), 200
-    return jsonify({"ok": True, "backend_status": body, "base": base}), 200
-
-if __name__ == '__main__':
-    LOG.info("Starting webui on 0.0.0.0:5002")
-    app.run(host='0.0.0.0', port=int(os.getenv('WEBUI_PORT', 5002)), debug=False)
-
+@app.post("/admin/config")
+async def write_config(payload: Dict[str, Any], auth: bool = Depends(check_basic_auth)):
+    tmp = CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=2))
+    tmp.replace(CONFIG_PATH)
+    return {"ok": True}
 EOF
-mkdir -p "src/webui/templates"
 
 echo "Creating file: src/webui/templates/layout.html"
 cat << 'EOF' > "src/webui/templates/layout.html"
@@ -1682,7 +1530,6 @@ cat << 'EOF' > "src/webui/templates/layout.html"
   </footer>
 </body>
 </html>
-
 EOF
 
 echo "Creating file: src/webui/templates/sync.html"
@@ -1711,7 +1558,6 @@ cat << 'EOF' > "src/webui/templates/sync.html"
     });
   </script>
 {% endblock %}
-
 EOF
 
 echo "Creating file: src/webui/templates/shelves.html"
@@ -1729,7 +1575,6 @@ cat << 'EOF' > "src/webui/templates/shelves.html"
     <li><a href="{{ url_for('shelf_view', shelf_name='owned') }}">owned</a></li>
   </ul>
 {% endblock %}
-
 EOF
 
 echo "Creating file: src/webui/templates/search.html"
@@ -1784,7 +1629,6 @@ cat << 'EOF' > "src/webui/templates/search.html"
     }
   </script>
 {% endblock %}
-
 EOF
 
 echo "Creating file: src/webui/templates/downloads.html"
@@ -1807,7 +1651,6 @@ cat << 'EOF' > "src/webui/templates/downloads.html"
     <tbody></tbody>
   </table>
 {% endblock %}
-
 EOF
 
 echo "Creating file: src/webui/templates/status.html"
@@ -1827,7 +1670,6 @@ cat << 'EOF' > "src/webui/templates/status.html"
     loadStatus();
   </script>
 {% endblock %}
-
 EOF
 
 echo "Creating file: src/webui/templates/shelf_view.html"
@@ -1897,10 +1739,7 @@ cat << 'EOF' > "src/webui/templates/shelf_view.html"
     {% endif %}
   </div>
 {% endblock %}
-
 EOF
-mkdir -p "src/webui/static"
-mkdir -p "src/webui/static/css"
 
 echo "Creating file: src/webui/static/css/style.css"
 cat << 'EOF' > "src/webui/static/css/style.css"
@@ -1926,9 +1765,7 @@ body { font-family: Inter, Arial, Helvetica, sans-serif; background: var(--bg); 
 .status-panel { margin-top:12px; padding:8px; background:#fff; border:1px solid #eee; border-radius:6px; }
 
 .info { background:#fff; padding:8px; border-radius:6px; border:1px solid #eee; }
-
 EOF
-mkdir -p "src/webui/static/js"
 
 echo "Creating file: src/webui/static/js/app.js"
 cat << 'EOF' > "src/webui/static/js/app.js"
@@ -2065,14 +1902,11 @@ async function cancelDownload(bookId){
   const j = await res.json();
   alert(JSON.stringify(j));
 }
-
 EOF
 
 echo "Creating file: src/webui/__init__.py"
 cat << 'EOF' > "src/webui/__init__.py"
-
 EOF
-mkdir -p "src/utils"
 
 echo "Creating file: src/utils/logger.py"
 cat << 'EOF' > "src/utils/logger.py"
@@ -2122,7 +1956,6 @@ def setup_logger(log_file, level='INFO'):
     logger = logging.getLogger()
     logger.debug(f"Logger initialized with file: {log_path}, level: {log_level}")
     return logger
-
 EOF
 
 echo "Creating file: src/utils/config_loader.py"
@@ -2147,7 +1980,6 @@ def load_config(config_path='/app/config/config.json'):
         raise Exception(f"Configuration file {config_path} not found")
     except json.JSONDecodeError:
         raise Exception(f"Invalid JSON in configuration file {config_path}")
-
 EOF
 
 echo "Creating file: src/utils/migrate_db.py"
@@ -2231,7 +2063,6 @@ for col, typ in desired.items():
 conn.commit()
 conn.close()
 print("Migration complete.")
-
 EOF
 
 echo "Creating file: src/utils/database.py"
@@ -2582,12 +2413,10 @@ class Database:
         except Exception:
             LOG.exception("Failed to count rows")
             return 0
-
 EOF
 
 echo "Creating file: src/utils/__init__.py"
 cat << 'EOF' > "src/utils/__init__.py"
-
 EOF
 
 echo "Creating file: src/job_runner.py"
@@ -2628,80 +2457,114 @@ if __name__ == "__main__":
     config = load_config()  # Load config early
     setup_logger(config['log_file'], os.getenv('LOG_LEVEL', 'DEBUG'))
     logging.info("Job runner starting")
-    run_jobs()
-EOF
+    run_jobs()EOF
 
 echo "Creating file: src/__init__.py"
 cat << 'EOF' > "src/__init__.py"
-
 EOF
 
 echo "Creating file: docker-compose.yml"
 cat << 'EOF' > "docker-compose.yml"
-version: '3.8'
+version: "3.9"
+
 services:
-  ebooks-manager:
-    build:
-      context: .
-    container_name: ebooks-manager
-    restart: unless-stopped
-    env_file: /mnt/data/docker/docker-scripts/.env
-    profiles:
-      - "ebooks"
-      - "mediaserver"
-    labels:
-      - "com.priority=24"
-      - "homepage.group=Media Server"
-      - "homepage.name=Book Manager"
-      - "homepage.icon=download.svg"
-      - "homepage.href=http://ebooks-manager.mayserver.local"
-    depends_on:
-      calibre-web:
-        condition: service_healthy
-      byparr-default:
-        condition: service_healthy
-    environment:
-      - UID=${PUID}
-      - GID=${PGID}
-      - TZ=${TZ}
-      - FLARESOLVERR_URL=http://127.0.0.1:8191/v1
-      - FLASK_HOST=0.0.0.0
-      - FLASK_PORT=5002
-      - LOG_LEVEL=DEBUG
-      - DRY_RUN=no
-      - PYTHONUNBUFFERED=1
-      - PYTHONPATH=/app
-      - WEBPAGE_CACHE_DAYS=30
-    volumes:
-      - /mnt/data/media/local/books/ingest:/cwa-book-ingest
-      - /mnt/data/docker/docker-config/ebooks-manager/config:/app/config
-      - /mnt/data/docker/docker-config/ebooks-manager/logs:/app/logs
-      - /mnt/data/docker/docker-config/ebooks-manager/data:/app/data
-    network_mode: "service:adguardhome_essential"
-    shm_size: '4gb'
+  webui:
+    build: .
+    container_name: ebooks-webui
     ports:
       - "5002:5002"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5002/status"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+    environment:
+      # User / Group IDs (map to host for file permissions)
+      UID: ${PUID}
+      GID: ${PGID}
+      TZ: ${TZ}
+
+      # Downloader API (search + download)
+      CWA_API_URL: "http://cwa-downloader:5000/request/api"
+      CWA_USERNAME: "${CWA_USERNAME:-}"
+      CWA_PASSWORD: "${CWA_PASSWORD:-}"
+
+      # Admin auth for WebUI config API
+      ADMIN_USER: "${ADMIN_USER:-admin}"
+      ADMIN_PASS: "${ADMIN_PASS:-changeme}"
+
+      # Database
+      DATABASE_PATH: "/app/data/databases/goodreads.db"
+
+      # Python runtime configs
+      PYTHONUNBUFFERED: 1
+      PYTHONPATH: /app
+
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+    depends_on:
+      - cwa-downloader
     logging:
+      driver: "json-file"
       options:
         max-size: "10m"
-        max-file: "3"
-  flaresolverr:
-    image: ghcr.io/flaresolverr/flaresolverr:latest
-    container_name: flaresolverr
-    environment:
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - CAPTCHA_SOLVER=none
-    ports:
-      - "8191:8191"
-    restart: unless-stopped
-    network_mode: "service:adguardhome_essential"
+        max-file: "5"
 
+  cwa-downloader:
+    image: ghcr.io/calibrain/calibre-web-automated-book-downloader:latest
+    container_name: cwa-downloader
+    environment:
+      # User / Group IDs
+      UID: ${PUID}
+      GID: ${PGID}
+      TZ: ${TZ}
+
+      # Flask app config (used internally by downloader)
+      FLASK_HOST: 0.0.0.0
+      FLASK_PORT: 5000
+
+      # Optional external services
+      FLARESOLVERR_URL: http://127.0.0.1:8191/v1
+
+      # Logging and behavior
+      LOG_LEVEL: DEBUG
+      DRY_RUN: no
+      WEBPAGE_CACHE_DAYS: 30
+
+      # Calibre library path inside container
+      CALIBRE_LIBRARY: /books
+
+      # Python runtime
+      PYTHONUNBUFFERED: 1
+      PYTHONPATH: /app
+    volumes:
+      - ./books:/books
+    ports:
+      - "5000:5000"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # Future service: Goodreads ↔️ Calibre-Web sync
+  cwa-details:
+    image: ghcr.io/crocodilestick/calibre-web-automated:latest
+    container_name: cwa-details
+    environment:
+      UID: ${PUID}
+      GID: ${PGID}
+      TZ: ${TZ}
+      PYTHONUNBUFFERED: 1
+      PYTHONPATH: /app
+    volumes:
+      - ./books:/books
+    ports:
+      - "5001:5000"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    # Disabled by default until needed
+    deploy:
+      replicas: 0
 EOF
 
 echo "Creating file: README.md"
@@ -3062,8 +2925,7 @@ When you need assistance, provide the following information to get a concise and
 
 ### Example Prompt:
 
-> I run the project with Docker using these envs: `GOODREADS_PER_PAGE=100`, `WEBUI_PER_PAGE=30`, `DOWNLOAD_BACKEND_URL=http://cwa:8080`. The web UI shows 30 per page but scraper logs say it fetched 100 per page. The UI raises `TypeError: get_books_by_shelf() got an unexpected keyword argument 'offset'`. Here are the last 50 log lines: (paste logs here). Please fix any remaining DB function mismatches and make the UI use the DB offset properly.
-EOF
+> I run the project with Docker using these envs: `GOODREADS_PER_PAGE=100`, `WEBUI_PER_PAGE=30`, `DOWNLOAD_BACKEND_URL=http://cwa:8080`. The web UI shows 30 per page but scraper logs say it fetched 100 per page. The UI raises `TypeError: get_books_by_shelf() got an unexpected keyword argument 'offset'`. Here are the last 50 log lines: (paste logs here). Please fix any remaining DB function mismatches and make the UI use the DB offset properly.EOF
 
 echo "----------------------------------------------------"
 echo "Project '$PROJECT_NAME' has been successfully created."

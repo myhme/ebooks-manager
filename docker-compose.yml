@@ -1,63 +1,100 @@
-version: '3.8'
+version: "3.9"
+
 services:
-  ebooks-manager:
-    build:
-      context: .
-    container_name: ebooks-manager
-    restart: unless-stopped
-    env_file: /mnt/data/docker/docker-scripts/.env
-    profiles:
-      - "ebooks"
-      - "mediaserver"
-    labels:
-      - "com.priority=24"
-      - "homepage.group=Media Server"
-      - "homepage.name=Book Manager"
-      - "homepage.icon=download.svg"
-      - "homepage.href=http://ebooks-manager.mayserver.local"
-    depends_on:
-      calibre-web:
-        condition: service_healthy
-      byparr-default:
-        condition: service_healthy
-    environment:
-      - UID=${PUID}
-      - GID=${PGID}
-      - TZ=${TZ}
-      - FLARESOLVERR_URL=http://127.0.0.1:8191/v1
-      - FLASK_HOST=0.0.0.0
-      - FLASK_PORT=5002
-      - LOG_LEVEL=DEBUG
-      - DRY_RUN=no
-      - PYTHONUNBUFFERED=1
-      - PYTHONPATH=/app
-      - WEBPAGE_CACHE_DAYS=30
-    volumes:
-      - /mnt/data/media/local/books/ingest:/cwa-book-ingest
-      - /mnt/data/docker/docker-config/ebooks-manager/config:/app/config
-      - /mnt/data/docker/docker-config/ebooks-manager/logs:/app/logs
-      - /mnt/data/docker/docker-config/ebooks-manager/data:/app/data
-    network_mode: "service:adguardhome_essential"
-    shm_size: '4gb'
+  webui:
+    build: .
+    container_name: ebooks-webui
     ports:
       - "5002:5002"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5002/status"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+    environment:
+      # User / Group IDs (map to host for file permissions)
+      UID: ${PUID}
+      GID: ${PGID}
+      TZ: ${TZ}
+
+      # Downloader API (search + download)
+      CWA_API_URL: "http://cwa-downloader:5000/request/api"
+      CWA_USERNAME: "${CWA_USERNAME:-}"
+      CWA_PASSWORD: "${CWA_PASSWORD:-}"
+
+      # Admin auth for WebUI config API
+      ADMIN_USER: "${ADMIN_USER:-admin}"
+      ADMIN_PASS: "${ADMIN_PASS:-changeme}"
+
+      # Database
+      DATABASE_PATH: "/app/data/databases/goodreads.db"
+
+      # Python runtime configs
+      PYTHONUNBUFFERED: 1
+      PYTHONPATH: /app
+
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+    depends_on:
+      - cwa-downloader
     logging:
+      driver: "json-file"
       options:
         max-size: "10m"
-        max-file: "3"
-  flaresolverr:
-    image: ghcr.io/flaresolverr/flaresolverr:latest
-    container_name: flaresolverr
+        max-file: "5"
+
+  cwa-downloader:
+    image: ghcr.io/calibrain/calibre-web-automated-book-downloader:latest
+    container_name: cwa-downloader
     environment:
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - CAPTCHA_SOLVER=none
+      # User / Group IDs
+      UID: ${PUID}
+      GID: ${PGID}
+      TZ: ${TZ}
+
+      # Flask app config (used internally by downloader)
+      FLASK_HOST: 0.0.0.0
+      FLASK_PORT: 5000
+
+      # Optional external services
+      FLARESOLVERR_URL: http://127.0.0.1:8191/v1
+
+      # Logging and behavior
+      LOG_LEVEL: DEBUG
+      DRY_RUN: no
+      WEBPAGE_CACHE_DAYS: 30
+
+      # Calibre library path inside container
+      CALIBRE_LIBRARY: /books
+
+      # Python runtime
+      PYTHONUNBUFFERED: 1
+      PYTHONPATH: /app
+    volumes:
+      - ./books:/books
     ports:
-      - "8191:8191"
-    restart: unless-stopped
-    network_mode: "service:adguardhome_essential"
+      - "5000:5000"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # Future service: Goodreads ↔️ Calibre-Web sync
+  cwa-details:
+    image: ghcr.io/crocodilestick/calibre-web-automated:latest
+    container_name: cwa-details
+    environment:
+      UID: ${PUID}
+      GID: ${PGID}
+      TZ: ${TZ}
+      PYTHONUNBUFFERED: 1
+      PYTHONPATH: /app
+    volumes:
+      - ./books:/books
+    ports:
+      - "5001:5000"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    # Disabled by default until needed
+    deploy:
+      replicas: 0

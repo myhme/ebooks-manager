@@ -3,63 +3,22 @@
 {% block content %}
   <h2>Shelf: {{ shelf_name }}</h2>
 
-  <form action="{{ url_for('sync_shelf', shelf_name=shelf_name) }}" method="post" style="margin-bottom:1em;">
-    <button class="btn primary">🔄 Sync Now</button>
-  </form>
+  <div class="controls">
+    <button class="btn primary" id="syncBtn">🔄 Sync Now</button>
+    <span id="syncStatus" class="small">Idle</span>
+  </div>
 
-  <table class="books-table">
-    <thead>
-      <tr>
-        <th>#</th>
-        <th>Cover</th>
-        <th>Title</th>
-        <th>Author</th>
-        <th>Series</th>
-        <th>Shelves</th>
-        <th>Added</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for book in books %}
-        <tr>
-          <td>{{ offset + loop.index }}</td>
-          <td>
-            {% if book.cover_local_path %}
-              <img src="{{ url_for('serve_cover', filename=book.cover_local_path) }}" style="height:60px;">
-            {% else %}
-              cover
-            {% endif %}
-          </td>
-          <td><a href="https://www.goodreads.com/book/show/{{ book.goodreads_id }}" target="_blank">{{ book.title }}</a></td>
-          <td>{{ book.author }}</td>
-          <td>
-            {% if book.series_name %}
-              {{ book.series_name }} #{{ book.series_number }}
-            {% endif %}
-          </td>
-          <td>{{ book.shelves }}</td>
-          <td>{{ book.added|default('') }}</td>
-          <td>
-            <form class="inline-form" method="post" action="{{ url_for('api_search_and_queue') }}">
-              <input type="hidden" name="goodreads_id" value="{{ book.goodreads_id }}">
-              <input type="hidden" name="title" value="{{ book.title }}">
-              <input type="hidden" name="author" value="{{ book.author }}">
-              <button class="btn">Download</button>
-            </form>
-          </td>
-        </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div id="shelfTableContainer">
+    {% include "partials/shelf_table.html" %}
+  </div>
 
-  <div class="pagination">
+  <div id="paginationContainer" class="pagination">
     {% if page > 1 %}
-      <a href="{{ url_for('shelf_view', shelf_name=shelf_name, page=page-1) }}">Prev</a>
+      <a href="{{ url_for('shelf_view', shelf=shelf_name, page=page-1, per_page=per_page) }}" class="page-link">Prev</a>
     {% endif %}
-    Page {{ page }}
-    {% if has_next %}
-      <a href="{{ url_for('shelf_view', shelf_name=shelf_name, page=page+1) }}">Next</a>
+    Page {{ page }} / {{ total_pages }}
+    {% if page < total_pages %}
+      <a href="{{ url_for('shelf_view', shelf=shelf_name, page=page+1, per_page=per_page) }}" class="page-link">Next</a>
     {% endif %}
   </div>
 {% endblock %}

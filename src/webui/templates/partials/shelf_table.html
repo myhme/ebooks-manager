@@ -1,0 +1,50 @@
+{# templates/partials/shelf_table.html #}
+<table class="books-table">
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Cover</th>
+      <th>Title</th>
+      <th>Author</th>
+      <th>Series</th>
+      <th>Shelves</th>
+      <th>Added</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for book in books %}
+      <tr data-goodreads-id="{{ book.goodreads_id }}"
+          data-title="{{ book.title }}"
+          data-author="{{ book.author }}"
+          data-isbn="{{ book.isbn }}"
+          data-isbn13="{{ book.isbn13 }}">
+        <td>{{ offset + loop.index }}</td>
+        <td>
+          {% if book.cover_local_path %}
+            <img src="{{ url_for('serve_cover', path=book.cover_local_path) }}" class="cover">
+          {% else %}
+            —
+          {% endif %}
+        </td>
+        <td>
+          <a href="https://www.goodreads.com/book/show/{{ book.goodreads_id }}" target="_blank">
+            {{ book.title }}
+          </a>
+        </td>
+        <td>{{ book.author }}</td>
+        <td>
+          {% if book.series_name %}
+            {{ book.series_name }} #{{ book.series_number }}
+          {% endif %}
+        </td>
+        <td>{{ book.shelves }}</td>
+        <td>{{ book.added|default('') }}</td>
+        <td>
+          <button class="btn queue-btn">Queue</button>
+          <button class="btn auto-queue-btn">Auto Queue</button>
+        </td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>

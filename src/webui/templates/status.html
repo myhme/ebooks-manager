@@ -1,15 +1,19 @@
-{# templates/status.html #}
 {% extends "layout.html" %}
 {% block title %}Status{% endblock %}
 {% block content %}
-  <h2>System Status</h2>
-  <div id="sysStatus" class="info small">Loading...</div>
-  <script>
-    async function loadStatus(){
-      const res = await fetch('/api/backend_info');
-      const j = await res.json();
-      document.getElementById('sysStatus').innerText = JSON.stringify(j, null, 2);
-    }
-    loadStatus();
-  </script>
+  <h2>Queue & Active Downloads</h2>
+  <button id="refreshStatusBtn" class="btn">🔄 Refresh</button>
+
+  <h3>Queue</h3>
+  {% include "partials/queue_panel.html" %}
+
+  <h3>Active</h3>
+  <table id="status-active-table" class="books-table">
+    <thead>
+      <tr>
+        <th>Title</th><th>Status</th><th>Progress</th><th>Priority</th><th>Action</th>
+      </tr>
+    </thead>
+    {% include "partials/active_table.html" %}
+  </table>
 {% endblock %}

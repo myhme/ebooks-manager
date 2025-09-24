@@ -3,7 +3,18 @@ from pathlib import Path
 import json
 import sys
 
-REQUIRED_CONFIG_KEYS = ['goodreads_username', 'goodreads_password', 'goodreads_user_id', 'cwa_api_url', 'cwa_username', 'cwa_password', 'database_path', 'log_file', 'history_file', 'cache_dir']
+REQUIRED_CONFIG_KEYS = [
+    'goodreads_username',
+    'goodreads_password',
+    'goodreads_user_id',
+    'cwa_api_url',
+    'cwa_username',
+    'cwa_password',
+    'database_path',
+    'log_file',
+    'history_file',
+    'cache_dir'
+]
 
 def check_and_create_app_files():
     """
@@ -57,7 +68,8 @@ def check_and_create_app_files():
                     "goodreads_username": "your_goodreads_email",
                     "goodreads_password": "your_goodreads_password",
                     "goodreads_user_id": "your_goodreads_user_id",
-                    "cwa_api_url": "http://calibre-web:8084/request/api",
+                    # 🔹 Updated default: docker-compose service name + port
+                    "cwa_api_url": "http://cwa-downloader:5000/request/api",
                     "cwa_username": "your_cwa_username",
                     "cwa_password": "your_cwa_password",
                     "database_path": "/app/data/databases/goodreads.db",
@@ -67,17 +79,38 @@ def check_and_create_app_files():
                 }
                 config_file.write_text(json.dumps(default_config, indent=2))
 
-        # Validate config
+        # --- Load config ---
         try:
             with open(config_file, 'r') as f:
                 config = json.load(f)
-            missing_keys = [key for key in REQUIRED_CONFIG_KEYS if key not in config]
-            if missing_keys:
-                raise ValueError(f"Config missing required keys: {missing_keys}")
-            print("Config validated successfully.")
-        except (json.JSONDecodeError, ValueError) as e:
-            print(f"Invalid config: {e}. Please fix '{config_file}'.")
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            print(f"Invalid or missing config: {e}. Please fix '{config_file}'.")
             sys.exit(1)
+
+        # --- Apply ENV overrides ---
+        overrides = {
+            "cwa_api_url": os.getenv("CWA_API_URL"),
+            "cwa_username": os.getenv("CWA_USERNAME"),
+            "cwa_password": os.getenv("CWA_PASSWORD"),
+            "database_path": os.getenv("DATABASE_PATH"),
+        }
+        changed = False
+        for key, value in overrides.items():
+            if value:
+                config[key] = value
+                changed = True
+                print(f"Overriding config[{key}] with environment variable.")
+
+        if changed:
+            config_file.write_text(json.dumps(config, indent=2))
+            print(f"Config updated with environment overrides: {config_file}")
+
+        # --- Validate config ---
+        missing_keys = [key for key in REQUIRED_CONFIG_KEYS if key not in config]
+        if missing_keys:
+            print(f"Config missing required keys: {missing_keys}")
+            sys.exit(1)
+        print("Config validated successfully.")
 
         # --- Log and History Files ---
         log_file = log_dir / 'sync_log.txt'

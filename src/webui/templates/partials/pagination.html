@@ -1,0 +1,9 @@
+<div id="paginationContainer" class="pagination">
+  {% if page > 1 %}
+    <a href="{{ url_for('shelf_view', shelf=shelf_name, page=page-1, per_page=per_page) }}" class="page-link">Prev</a>
+  {% endif %}
+  Page {{ page }} / {{ total_pages }}
+  {% if page < total_pages %}
+    <a href="{{ url_for('shelf_view', shelf=shelf_name, page=page+1, per_page=per_page) }}" class="page-link">Next</a>
+  {% endif %}
+</div>

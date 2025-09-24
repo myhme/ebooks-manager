@@ -1,13 +1,28 @@
-{# templates/shelves.html #}
 {% extends "layout.html" %}
 {% block title %}Shelves{% endblock %}
 {% block content %}
-  <h2>Shelves</h2>
-  <p>Quick links to common shelves:</p>
-  <ul>
-    <li><a href="{{ url_for('shelf_view', shelf_name='to-download') }}">to-download</a></li>
-    <li><a href="{{ url_for('shelf_view', shelf_name='to-read') }}">to-read</a></li>
-    <li><a href="{{ url_for('shelf_view', shelf_name='read') }}">read</a></li>
-    <li><a href="{{ url_for('shelf_view', shelf_name='owned') }}">owned</a></li>
-  </ul>
+  <h2>All Shelves</h2>
+
+  <table class="books-table" data-shelves="1">
+    <thead>
+      <tr>
+        <th>Shelf</th>
+        <th>Books</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for shelf in shelves %}
+        <tr data-shelf="{{ shelf.name }}">
+          <td><a href="{{ url_for('shelf_view', shelf=shelf.name) }}">{{ shelf.name }}</a></td>
+          <td>{{ shelf.count }}</td>
+          <td>
+            <form method="post" action="{{ url_for('trigger_sync', shelf=shelf.name) }}" class="inline-form">
+              <button class="btn primary">🔄 Sync</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 {% endblock %}

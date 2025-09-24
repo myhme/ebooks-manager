@@ -1,61 +1,40 @@
 # Python
 __pycache__/
-*.py[cod]
-*$py.class
 *.pyc
 *.pyo
 *.pyd
-.Python
+*.db
+
+# Virtual env
+.venv/
 env/
 venv/
-pip-wheel-metadata/
-pip-delete-this-directory.txt
 
-# Virtual environments
-*.egg-info/
-.installed.cfg
-*.egg
-
-# OS generated files
-.DS_Store
-Thumbs.db
-
-# Editors
+# Local dev / editor files
 .vscode/
 .idea/
-*.sublime-project
-*.sublime-workspace
+*.code-workspace
 
-# Logs and databases
-*.log
-*.sqlite3
-data/
-logs/
-screenshots/
+# GitHub configs
+.github/
 
-# Docker
-docker-compose.yml
-.Dockerfile
+# Docker & Compose local overrides
 .dockerignore
+.devcontainer/
 
-# Environment variables
+# Local environment configs
 .env
-.env.example
+*.env.local
 
-# Build artifacts
-dist/
-build/
-*.tar.gz
+# Logs and runtime data
+logs/
+*.log
 
-# Test files
-tests/
+# Data & cache
+data/
+cache/
 
-# Node.js
-node_modules/
-npm-debug.log
-
-# macOS
-*.swp
-
-# Ignore Python cache and system files
-*.cache
+# Local scripts (don’t commit infra helpers)
+docker_rebuild.sh
+setup_project.sh
+setup_project_script_maker.sh

@@ -2,49 +2,9 @@
 {% block title %}Manual Search{% endblock %}
 {% block content %}
   <h2>Manual Search</h2>
-  <form id="manualSearchForm">
-    <label>Query: <input type="text" name="query" style="width:300px"></label>
-    <button class="btn primary" type="submit">Search</button>
+  <form id="manualSearchForm" class="controls">
+    <input id="searchQuery" type="text" placeholder="Enter title, author, or ISBN">
+    <button id="searchBtn" class="btn primary" type="submit">Search</button>
   </form>
-
-  <div id="manualSearchResult" style="margin-top:1em;"></div>
-
-  <script>
-    document.getElementById('manualSearchForm').addEventListener('submit', async (ev)=>{
-      ev.preventDefault();
-      const q = ev.target.query.value.trim();
-      if(!q) return;
-      document.getElementById('manualSearchResult').innerText = 'Searching...';
-      const res = await fetch('/api/manual_search', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({query:q})
-      });
-      const j = await res.json();
-      if(res.ok){
-        let html = '<h3>Results</h3><table class="books-table"><thead><tr><th>Title</th><th>Author</th><th>Action</th></tr></thead><tbody>';
-        if(Array.isArray(j.candidates)){
-          j.candidates.forEach(c=>{
-            html += `<tr><td>${c.title||''}</td><td>${c.author||''}</td>
-                       <td><button class="btn" onclick="queueCandidate('${c.id||c.md5||''}')">Queue</button></td></tr>`;
-          });
-        }
-        html += '</tbody></table>';
-        document.getElementById('manualSearchResult').innerHTML = html;
-      } else {
-        document.getElementById('manualSearchResult').innerText = 'Error: ' + JSON.stringify(j);
-      }
-    });
-
-    async function queueCandidate(id){
-      if(!id) return alert('Missing candidate id');
-      const res = await fetch('/api/queue_from_candidate', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({candidate_id:id})
-      });
-      const j = await res.json();
-      alert(JSON.stringify(j));
-    }
-  </script>
+  <div id="manualSearchResult"></div>
 {% endblock %}

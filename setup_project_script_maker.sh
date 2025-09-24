@@ -10,30 +10,37 @@
 # It ignores common version control and build files.
 # ==============================================================================
 
-# Exit immediately if a command exits with a non-zero status.
 set -e
 
 OUTPUT_SCRIPT="setup_project.sh"
 PROJECT_ROOT_DIR=$(pwd)
 CURRENT_SCRIPT_NAME=$(basename "$0")
 
-# Define patterns to ignore.
-# These will be excluded from the generated script.
+# Patterns to ignore (exact match or glob)
 IGNORE_PATTERNS=(
     ".git"
     ".github"
     ".gitignore"
     ".dockerignore"
-    "LICENSE"
-    ".sgt"
-    "__pycache__"
-    "*.pyc"
-    "*.log"
     "$OUTPUT_SCRIPT"
     "$CURRENT_SCRIPT_NAME"
+    "*.pyc"
+    "__pycache__"
+    "*.log"
 )
 
-# Create the output script and add the header.
+# Check if path should be ignored
+should_ignore() {
+    local path="$1"
+    for pattern in "${IGNORE_PATTERNS[@]}"; do
+        if [[ "$path" == $pattern || "$path" == *"/$pattern" || "$path" == $pattern/* ]]; then
+            return 0 # ignore
+        fi
+    done
+    return 1 # keep
+}
+
+# Create output script with header
 echo "Creating the new '$OUTPUT_SCRIPT'..."
 cat << 'EOF' > "$OUTPUT_SCRIPT"
 #!/bin/bash
@@ -49,7 +56,6 @@ cat << 'EOF' > "$OUTPUT_SCRIPT"
 #   2. Run it: ./setup_project.sh
 # ==============================================================================
 
-# Exit immediately if a command exits with a non-zero status.
 set -e
 
 PROJECT_NAME="my_project"
@@ -59,49 +65,30 @@ mkdir -p "$PROJECT_NAME"
 cd "$PROJECT_NAME"
 
 echo "Creating directories..."
-
 EOF
 
-# Function to check if a path should be ignored.
-should_ignore() {
-    local path="$1"
-    for pattern in "${IGNORE_PATTERNS[@]}"; do
-        if [[ "$path" == *"$pattern"* ]]; then
-            return 0 # True (should ignore)
-        fi
-    done
-    return 1 # False (do not ignore)
-}
-
-# Recursively find all directories and files.
-find "$PROJECT_ROOT_DIR" -print0 | while IFS= read -r -d '' item; do
-    relative_path="${item#$PROJECT_ROOT_DIR/}"
-
-    # Skip the root directory itself.
-    if [ "$relative_path" == "" ]; then
-        continue
-    fi
-    
-    # Check if the path or any of its parent directories should be ignored.
-    if should_ignore "$relative_path"; then
-        continue
-    fi
-
-    if [ -d "$item" ]; then
-        # It's a directory, add a mkdir command.
+# --- Add directories first ---
+find "$PROJECT_ROOT_DIR" -type d | while read -r dir; do
+    relative_path="${dir#$PROJECT_ROOT_DIR/}"
+    [[ -z "$relative_path" ]] && continue
+    if ! should_ignore "$relative_path"; then
         echo "mkdir -p \"$relative_path\"" >> "$OUTPUT_SCRIPT"
-    elif [ -f "$item" ]; then
-        # It's a file, add a here-document to write its content.
-        echo "" >> "$OUTPUT_SCRIPT"
-        echo "echo \"Creating file: $relative_path\"" >> "$OUTPUT_SCRIPT"
-        echo "cat << 'EOF' > \"$relative_path\"" >> "$OUTPUT_SCRIPT"
-        cat "$item" >> "$OUTPUT_SCRIPT"
-        # FIX: ensure EOF is always on its own line
-        printf '\nEOF\n' >> "$OUTPUT_SCRIPT"
     fi
 done
 
-# Add a final success message to the generated script.
+# --- Add files after directories ---
+find "$PROJECT_ROOT_DIR" -type f | while read -r file; do
+    relative_path="${file#$PROJECT_ROOT_DIR/}"
+    if ! should_ignore "$relative_path"; then
+        echo "" >> "$OUTPUT_SCRIPT"
+        echo "echo \"Creating file: $relative_path\"" >> "$OUTPUT_SCRIPT"
+        echo "cat << 'EOF' > \"$relative_path\"" >> "$OUTPUT_SCRIPT"
+        cat "$file" >> "$OUTPUT_SCRIPT"
+        echo "EOF" >> "$OUTPUT_SCRIPT"
+    fi
+done
+
+# Footer
 cat << 'EOF' >> "$OUTPUT_SCRIPT"
 
 echo "----------------------------------------------------"
@@ -111,6 +98,5 @@ echo "----------------------------------------------------"
 
 EOF
 
-# Make the generated script executable.
 chmod +x "$OUTPUT_SCRIPT"
 echo "The script '$OUTPUT_SCRIPT' has been created and is ready to use."

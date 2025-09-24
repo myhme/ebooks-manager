@@ -1,18 +1,19 @@
-{# templates/downloads.html #}
 {% extends "layout.html" %}
 {% block title %}Downloads{% endblock %}
 {% block content %}
-  <h2>Download Queue & Status</h2>
-  <p><button id="refreshBtn" class="btn">Refresh</button> <a href="{{ url_for('shelf_view', shelf_name='to-download') }}">Back to Shelves</a></p>
-
-  <div id="backendStatus" class="info small">Checking backend...</div>
+  <h2>Active Downloads</h2>
+  <button id="refreshBtn" class="btn">🔄 Refresh</button>
 
   <h3>Queue</h3>
-  <pre id="queueStatus">Loading...</pre>
+  {% include "partials/queue_panel.html" %}
 
-  <h3>Active Downloads</h3>
-  <table class="books-table" id="active-table">
-    <thead><tr><th>Title</th><th>Status</th><th>Progress</th><th>Priority</th><th>Action</th></tr></thead>
-    <tbody></tbody>
+  <h3>Active</h3>
+  <table id="active-table" class="books-table">
+    <thead>
+      <tr>
+        <th>Title</th><th>Status</th><th>Progress</th><th>Priority</th><th>Action</th>
+      </tr>
+    </thead>
+    {% include "partials/active_table.html" %}
   </table>
 {% endblock %}

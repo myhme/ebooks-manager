@@ -1,24 +1,11 @@
-{# templates/sync.html #}
 {% extends "layout.html" %}
 {% block title %}Sync{% endblock %}
 {% block content %}
-  <h2>Manual Sync</h2>
-  <p>Trigger a bookshelf sync for a shelf:</p>
-  <form id="syncForm">
-    <label>Shelf name: <input name="shelf" value="to-download"></label>
-    <button class="btn" type="submit">Start Sync</button>
-  </form>
-  <div id="syncResult" class="small"></div>
+  <h2>Goodreads Sync</h2>
 
-  <script>
-    document.getElementById('syncForm').addEventListener('submit', async (ev)=>{
-      ev.preventDefault();
-      const fd = new FormData(ev.target);
-      const shelf = fd.get('shelf');
-      document.getElementById('syncResult').innerText = 'Starting...';
-      const res = await fetch('/sync/' + encodeURIComponent(shelf), {method: 'POST'});
-      const j = await res.json();
-      document.getElementById('syncResult').innerText = JSON.stringify(j);
-    });
-  </script>
+  <div class="controls">
+    <button id="syncAllBtn" class="btn primary">🔄 Sync All Shelves</button>
+  </div>
+
+  <div id="syncStatus" class="status-panel small">Ready</div>
 {% endblock %}
