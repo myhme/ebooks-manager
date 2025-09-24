@@ -1,357 +1,363 @@
-# Ebooks Manager — README
+# 📚 Ebooks Manager
 
-A short, practical guide to help you (and future ChatGPT sessions) understand this project, how it’s organized, how to run it, and where the important files live. Use this as the canonical orientation when you return to the project or ask for help.
+[![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
+[![Python](https://img.shields.io/badge/python-3.11+-blue.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 
----
+A self-hosted web application that seamlessly integrates with your Goodreads account to manage your ebook collection. Scrape your Goodreads shelves, automatically download book covers, and queue books for download through integrated backend services.
 
-# Overview
+## ✨ Features
 
-**Ebooks Manager** is a self-hosted application that:
+- 🔄 **Goodreads Integration** - Automatically sync your Goodreads shelves and book metadata
+- 🖼️ **Cover Management** - Download and serve book covers locally  
+- 🌐 **Web Interface** - Modern web UI to browse shelves and manage downloads
+- 📥 **Download Queue** - Queue books for download via Calibre-Web-Automated (CWA) or custom backends
+- 🔍 **Smart Search** - Intelligent book matching and scoring algorithms
+- 📱 **Responsive Design** - Works on desktop and mobile devices
+- 🐳 **Docker Ready** - Easy deployment with Docker Compose
+- 🔧 **Configurable** - Extensive configuration options via environment variables
 
-- Scrapes your Goodreads shelf(s) (using a Selenium-enabled or `requests` fallback scraper).
-- Stores book metadata in a local SQLite database.
-- Integrates with a remote download/search backend (e.g. Calibre-Web-Automated (CWA) or the AA-based backend) to search for and queue downloads.
-- Provides a Flask web UI to view shelves, queue downloads, and monitor download status.
+## 🚀 Quick Start
 
-Key goals of the recent refactor:
-- Robust, extensible `Database` that tolerates schema changes and supports pagination (offset).
-- Cleaner web UI that reads from the DB (not live scraping), serves downloaded cover images, and includes a downloads page.
-- Goodreads scraper improved to use the special `#ALL#` shelf view, a configurable per-page parameter (defaults to 100), pagination, dynamic column mapping, cover downloading, and search-request logging.
-- Search requests and candidate results saved to `cache/search_requests/` for later inspection and debugging.
+### Prerequisites
 
----
+- Docker and Docker Compose
+- Goodreads account
+- (Optional) Calibre-Web-Automated for book downloads
 
-# Repo layout (important files)
+### Installation
+
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/myhme/ebooks-manager.git
+   cd ebooks-manager
+   ```
+
+2. **Configure environment**
+   ```bash
+   cp .env.example .env
+   # Edit .env with your settings
+   ```
+
+3. **Set up configuration**
+   ```bash
+   cp config/config.json.template config/config.json
+   # Edit config.json with your Goodreads credentials
+   ```
+
+4. **Start the application**
+   ```bash
+   docker-compose up -d
+   ```
+
+5. **Access the web interface**
+   - Open http://localhost:5002 in your browser
+   - Your Goodreads shelves will be automatically synced
+
+## 📋 Configuration
+
+### Environment Variables
+
+Create a `.env` file based on `.env.example`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PUID` | `1000` | User ID for file permissions |
+| `PGID` | `1000` | Group ID for file permissions |
+| `TZ` | `Asia/Kolkata` | Timezone |
+| `LOG_LEVEL` | `DEBUG` | Logging level |
+| `FLASK_HOST` | `0.0.0.0` | Web server host |
+| `FLASK_PORT` | `5002` | Web server port |
+| `DRY_RUN` | `yes` | Enable dry run mode |
+| `WEBPAGE_CACHE_DAYS` | `30` | Cache duration for web pages |
+
+### Application Configuration
+
+Edit `config/config.json`:
+
+```json
+{
+    "goodreads_username": "your_goodreads_email",
+    "goodreads_password": "your_goodreads_password", 
+    "goodreads_user_id": "12345678",
+    "cwa_api_url": "http://cwa-downloader:5000/request/api",
+    "cwa_username": "your_cwa_username",
+    "cwa_password": "your_cwa_password",
+    "database_path": "/app/data/databases/goodreads.db",
+    "goodreads_per_page": 100
+}
+```
+
+### Additional Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GOODREADS_USER_ID` | - | Goodreads numeric user ID |
+| `GOODREADS_DB_PATH` | `/app/data/databases/goodreads.db` | SQLite database path |
+| `WEBUI_PER_PAGE` | `30` | Books per page in web UI |
+| `GOODREADS_PER_PAGE` | `100` | Books per page for scraper |
+| `DOWNLOAD_BACKEND_URL` | `http://localhost:8080` | Backend API URL |
+| `CWA_API_URL` | - | Calibre-Web-Automated API URL |
+| `CWA_USERNAME` | - | CWA username |
+| `CWA_PASSWORD` | - | CWA password |
+| `HEADLESS` | `1` | Run browser in headless mode |
+| `CHROMIUM_BIN` | `/usr/bin/chromium` | Chromium binary path |
+| `CHROMEDRIVER_PATH` | `/usr/bin/chromedriver` | ChromeDriver path |
+
+## 🏗️ Architecture
+
+### Project Structure
 
 ```
+ebooks-manager/
 ├── src/
-│ ├── scrapers/
-│ │ └── goodreads.py # Goodreads scraper (rewritten)
-│ ├── utils/
-│ │ └── database.py # Robust DB layer (rewritten)
-│ ├── webui/
-│ │ ├── app.py # Flask web UI backend (serves pages)
-│ │ └── templates/ # Jinja templates (layout, shelf_view, downloads, status)
-│ │	│   ├── layout.html
-│ │	│   ├── shelf_view.html
-│ │	│   ├── downloads.html
-│ │	│   ├── shelves.html
-│ │	│   ├── status.html
-│ │	│   └── sync.html
-│ │	└── static/
-│ │		├── css/
-│ │		│   └── style.css
-│ │		└── js/
-│ │			└── app.js
-│ ├── api/
-│ │ └── cwa_client.py # Optional: CWA client wrapper (if present)
-│ └── ... # other modules (backend, downloader, models, logger)
-├── app/ # optional alternative layout for webui files
-├── docker-compose.yml # (your deployment file)
-└── README.md # this file
+│   ├── scrapers/
+│   │   └── goodreads.py          # Goodreads scraper with Selenium support
+│   ├── utils/
+│   │   └── database.py           # SQLite database wrapper
+│   ├── webui/
+│   │   ├── app.py               # FastAPI web application
+│   │   ├── templates/           # Jinja2 templates
+│   │   │   ├── layout.html
+│   │   │   ├── shelf_view.html
+│   │   │   ├── downloads.html
+│   │   │   └── ...
+│   │   └── static/             # CSS, JS, and static assets
+│   ├── api/
+│   │   └── cwa_client.py       # CWA integration client
+│   └── ...
+├── config/
+│   └── config.json.template    # Configuration template
+├── docker-compose.yml          # Docker Compose configuration
+├── Dockerfile                  # Container build instructions
+└── README.md                   # This file
 ```
 
+### Key Components
 
+#### Database Layer (`src/utils/database.py`)
+- SQLite-based storage for books and sync history
+- Automatic schema migration and column addition
+- Pagination support with offset/limit
+- Methods: `save_book()`, `get_books_by_shelf()`, `get_shelves()`, etc.
 
----
+#### Goodreads Scraper (`src/scrapers/goodreads.py`)
+- Uses `#ALL#` shelf view for comprehensive book data
+- Selenium WebDriver support with requests fallback
+- Dynamic column mapping and series extraction
+- Cover image downloading and local storage
+- Search request logging for debugging
 
-# Key components & what they do
+#### Web Interface (`src/webui/app.py`)
+- FastAPI-based web application
+- Database-driven shelf browsing (no live scraping)
+- Local cover image serving
+- Download queue management UI
+- Real-time status updates
 
-### `src/utils/database.py`
-- Central DB wrapper around SQLite.
-- Creates `books` and `history` tables.
-- Adds missing columns automatically (so new scraper fields won’t break inserts).
-- Exposes:
-  - `save_book(book, shelves=None)`
-  - `get_book_by_id(goodreads_id)`
-  - `update_book(goodreads_id, updates)`
-  - `get_books_by_shelf(shelf_name, limit=30, offset=0)`
-  - `get_all_books`, `get_shelves`, `add_history`, `get_history`, and utility methods.
-- Fixes the prior `binding 39` error by building placeholders dynamically and keeping schema flexible.
-
-### `src/scrapers/goodreads.py`
-- Uses the `#ALL#` shelf view with `per_page` param (configurable; default `100`).
-- Can run with Selenium (if chromedriver/chrome present) to toggle settings and show all columns, otherwise falls back to `requests`.
-- Dynamically maps table headers to canonical keys (title, author, cover, isbn, etc.).
-- Extracts series info from title or, if missing, fetches the book page to find series id/number.
-- Downloads covers into `cache/covers/` and stores a local filename in DB `cover_local_path`.
-- Saves search request JSON files and candidate lists to `cache/search_requests/`.
-- Integrates with `CWAClient` or HTTP backend `/api/search` and `/api/download` to search & queue downloads.
-- Provides a `run_full_sync_and_queue_downloads(shelf_name="to-download")` helper to fetch the shelf and queue the best candidate for each book.
-
-### `src/webui/app.py`
-- Renders shelf pages from the DB (not scraping on demand).
-- Default `per_page` for UI = 30 (configurable via `WEBUI_PER_PAGE` env var).
-- Computes serial number (`offset + index + 1`) for each row.
-- Serves local covers via `/covers/<filename>`.
-- Adds `/downloads` UI page that polls `/api/status` to show queue/progress and allows cancel/clear.
-- Provides a small local API proxy to enqueue book downloads (`/webui/api/download`) that uses an in-process `backend` module if available or calls `DOWNLOAD_BACKEND_URL`.
-
-### Templates
-- `layout.html` — base layout and nav.
-- `shelf_view.html` — shelf listing with per-page control and "Download" button for each row.
-- `downloads.html` — download queue and controls (Cancel, Clear).
-- `status.html` — sync/fetch history partial.
-
----
-
-# Important directories (in container)
-
-- `/app/data/cache/covers` — downloaded cover images (served by Flask).
-- `/app/data/cache/search_requests` — saved search request JSON and candidate dumps.
-- `/app/data/databases` — SQLite DB files (goodreads.db or as configured).
-- `/app/logs` — application logs.
-
----
-
-# Config / Environment variables
-
-Common variables you can set (examples):
-
-- `GOODREADS_USER_ID` or put in your config dict: Goodreads numeric user id.
-- `GOODREADS_DB_PATH` — path to SQLite DB (default `/app/data/databases/goodreads.db`).
-- `WEBUI_PER_PAGE` — default per-page for the Web UI (default `30`).
-- `GOODREADS_PER_PAGE` — per_page used by the scraper (default `100`).
-- `DOWNLOAD_BACKEND_URL` — fallback HTTP backend URL for search/download endpoints (default `http://localhost:8080`).
-- `CWA_API_URL`, `CWA_USERNAME`, `CWA_PASSWORD` — if you use the `CWAClient` to search/queue.
-- Selenium:
-  - `HEADLESS=1` (default) or `0` to show browser.
-  - `CHROMIUM_BIN` — path to chromium binary.
-  - `CHROMEDRIVER_PATH` — path to chromedriver.
-- Ports / Flask config as usual.
-
-Example `docker-compose` snippet:
-```yaml
-services:
-  ebooks:
-    image: your-image
-    environment:
-      - WEBUI_PER_PAGE=30
-      - GOODREADS_PER_PAGE=100
-      - DOWNLOAD_BACKEND_URL=http://cwa-backend:8080
-      - CHROMEDRIVER_PATH=/usr/bin/chromedriver
-      - CHROMIUM_BIN=/usr/bin/chromium
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-    ports:
-      - "5000:5000"
-```
-
----
-
-# Key components & what they do
-
-### `src/utils/database.py`
-- Central DB wrapper around SQLite.
-- Creates `books` and `history` tables.
-- Adds missing columns automatically (so new scraper fields won’t break inserts).
-- Exposes:
-  - `save_book(book, shelves=None)`
-  - `get_book_by_id(goodreads_id)`
-  - `update_book(goodreads_id, updates)`
-  - `get_books_by_shelf(shelf_name, limit=30, offset=0)`
-  - `get_all_books`, `get_shelves`, `add_history`, `get_history`, and utility methods.
-- Fixes the prior `binding 39` error by building placeholders dynamically and keeping schema flexible.
-
-### `src/scrapers/goodreads.py`
-- Uses the `#ALL#` shelf view with `per_page` param (configurable; default `100`).
-- Can run with Selenium (if chromedriver/chrome present) to toggle settings and show all columns, otherwise falls back to `requests`.
-- Dynamically maps table headers to canonical keys (title, author, cover, isbn, etc.).
-- Extracts series info from title or, if missing, fetches the book page to find series id/number.
-- Downloads covers into `cache/covers/` and stores a local filename in DB `cover_local_path`.
-- Saves search request JSON files and candidate lists to `cache/search_requests/`.
-- Integrates with `CWAClient` or HTTP backend `/api/search` and `/api/download` to search & queue downloads.
-- Provides a `run_full_sync_and_queue_downloads(shelf_name="to-download")` helper to fetch the shelf and queue the best candidate for each book.
-
-### `src/webui/app.py`
-- Renders shelf pages from the DB (not scraping on demand).
-- Default `per_page` for UI = 30 (configurable via `WEBUI_PER_PAGE` env var).
-- Computes serial number (`offset + index + 1`) for each row.
-- Serves local covers via `/covers/<filename>`.
-- Adds `/downloads` UI page that polls `/api/status` to show queue/progress and allows cancel/clear.
-- Provides a small local API proxy to enqueue book downloads (`/webui/api/download`) that uses an in-process `backend` module if available or calls `DOWNLOAD_BACKEND_URL`.
-
-### Templates
-- `layout.html` — base layout and nav.
-- `shelf_view.html` — shelf listing with per-page control and "Download" button for each row.
-- `downloads.html` — download queue and controls (Cancel, Clear).
-- `status.html` — sync/fetch history partial.
-
----
-
-# Important directories (in container)
-
-- `/app/data/cache/covers` — downloaded cover images (served by Flask).
-- `/app/data/cache/search_requests` — saved search request JSON and candidate dumps.
-- `/app/data/databases` — SQLite DB files (goodreads.db or as configured).
-- `/app/logs` — application logs.
-
----
-
-# Config / Environment variables
-
-Common variables you can set (examples):
-
-- `GOODREADS_USER_ID` or put in your config dict: Goodreads numeric user id.
-- `GOODREADS_DB_PATH` — path to SQLite DB (default `/app/data/databases/goodreads.db`).
-- `WEBUI_PER_PAGE` — default per-page for the Web UI (default `30`).
-- `GOODREADS_PER_PAGE` — per_page used by the scraper (default `100`).
-- `DOWNLOAD_BACKEND_URL` — fallback HTTP backend URL for search/download endpoints (default `http://localhost:8080`).
-- `CWA_API_URL`, `CWA_USERNAME`, `CWA_PASSWORD` — if you use the `CWAClient` to search/queue.
-- Selenium:
-  - `HEADLESS=1` (default) or `0` to show browser.
-  - `CHROMIUM_BIN` — path to chromium binary.
-  - `CHROMEDRIVER_PATH` — path to chromedriver.
-- Ports / Flask config as usual.
-
-Example `docker-compose` snippet:
-```yaml
-services:
-  ebooks:
-    image: your-image
-    environment:
-      - WEBUI_PER_PAGE=30
-      - GOODREADS_PER_PAGE=100
-      - DOWNLOAD_BACKEND_URL=http://cwa-backend:8080
-      - CHROMEDRIVER_PATH=/usr/bin/chromedriver
-      - CHROMIUM_BIN=/usr/bin/chromium
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-    ports:
-      - "5000:5000"
-```
-
-# Goodreads Scraper & Downloader Web UI
-
-This project provides a web interface and backend scraper to sync your Goodreads shelves, download book covers, and queue books for download through an external backend service.
-
-## How to Run
-
-You can run the application locally for development or deploy it using Docker.
-
-### Local (for development)
-
-1.  Create and activate a Python virtual environment.
-2.  Install the required dependencies:
-    ```bash
-    pip install -r requirements.txt
-    ```
-    *(Ensure `selenium`, `beautifulsoup4`, `requests`, `flask`, etc., are included).*
-3.  Make sure the database path (defined by `GOODREADS_DB_PATH` or the default) is writable.
-4.  Start the web application:
-    ```bash
-    python -m src.webui.app
-    ```
-    or
-    ```bash
-    python src/webui/app.py
-    ```
-
-### Docker
-
-1.  Build the Docker image from the provided Dockerfile.
-2.  Run the container, ensuring volumes for `/app/data` and `/app/logs` are mounted to persist data.
-3.  If using Selenium, set the following environment variables in your `docker-compose.yml` or run command:
-    * `CHROMEDRIVER_PATH`
-    * `CHROMIUM_BIN`
-
----
-
-## Typical Workflows
+## 🔄 Usage Workflows
 
 ### 1. Initial Sync
+- Start the application
+- Scraper fetches your complete Goodreads library
+- Book covers are downloaded locally
+- All metadata is stored in SQLite database
 
--   Start the application (or run the scraper script directly).
--   The scraper will automatically fetch your entire Goodreads `#ALL#` shelf, paginating through the results.
--   It downloads book covers locally and saves all book data as rows in the database.
--   You can check the `/covers/` directory to see the saved images.
+### 2. Browse Your Library
+- Navigate to http://localhost:5002
+- Browse books by shelf (to-read, read, currently-reading, etc.)
+- View book details including covers, ratings, and metadata
 
-### 2. Queue Downloads
+### 3. Queue Downloads
+- Click "Download" button for any book
+- System searches for the book using title/author
+- Best match is automatically queued via CWA backend
+- Monitor progress in the Downloads page
 
--   Navigate to a shelf in the web UI (e.g., `/shelf/<shelf_name>`).
--   Click the "Download" button for a book.
--   The backend performs a search using the cleaned title and author's first name.
--   A JSON request is logged in `cache/search_requests/`.
--   The best candidate is chosen based on a scoring algorithm and queued for download via the configured backend API (CWA or a fallback HTTP service).
+### 4. Monitor Downloads
+- Visit `/downloads` page for real-time status
+- Cancel or clear downloads as needed
+- View download history and logs
 
-### 3. Monitor
+## 🐳 Docker Deployment
 
--   Open the `/downloads` page in the web UI to monitor the queue and see active downloads.
+### Using Docker Compose (Recommended)
+
+```yaml
+version: "3.9"
+services:
+  ebooks-webui:
+    build: .
+    container_name: ebooks-webui
+    ports:
+      - "5002:5002"
+    environment:
+      - GOODREADS_USER_ID=12345678
+      - WEBUI_PER_PAGE=30
+      - GOODREADS_PER_PAGE=100
+      - CWA_API_URL=http://cwa-downloader:5000/request/api
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+      - ./logs:/app/logs
+    depends_on:
+      - cwa-downloader
+      
+  cwa-downloader:
+    image: ghcr.io/calibrain/calibre-web-automated-book-downloader:latest
+    container_name: cwa-downloader
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./books:/books
+```
+
+### Manual Docker Build
+
+```bash
+# Build the image
+docker build -t ebooks-manager .
+
+# Run the container
+docker run -d \
+  --name ebooks-manager \
+  -p 5002:5002 \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/config:/app/config \
+  -v $(pwd)/logs:/app/logs \
+  -e GOODREADS_USER_ID=12345678 \
+  ebooks-manager
+```
+
+## 🛠️ Development
+
+### Local Development Setup
+
+1. **Create virtual environment**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+
+2. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Configure application**
+   ```bash
+   cp config/config.json.template config/config.json
+   # Edit config.json with your settings
+   ```
+
+4. **Run the application**
+   ```bash
+   python -m src.webui.app
+   # or
+   python src/webui/app.py
+   ```
+
+### Available Make Commands
+
+```bash
+make rebuild    # Rebuild Docker container
+make debug      # Rebuild with debug mode
+make up         # Start without rebuild
+make down       # Stop containers
+make logs       # View container logs
+```
+
+## 📁 Data Directories
+
+| Directory | Purpose |
+|-----------|---------|
+| `/app/data/cache/covers` | Downloaded book cover images |
+| `/app/data/cache/search_requests` | Search request logs and candidate matches |
+| `/app/data/databases` | SQLite database files |
+| `/app/logs` | Application logs |
+
+## 🔧 Troubleshooting
+
+### Common Issues
+
+#### Database Binding Errors
+```
+sqlite3.ProgrammingError: You did not supply a value for binding NN
+```
+**Solution:** The database module handles this automatically. If issues persist, delete the database file to start fresh.
+
+#### Cover Download Permission Errors
+**Solution:** Ensure the covers directory is writable:
+```bash
+chmod 755 /app/data/cache/covers
+chown appuser:appuser /app/data/cache/covers
+```
+
+#### Selenium WebDriver Issues
+**Solution:** Verify environment variables:
+- `CHROMEDRIVER_PATH` points to valid chromedriver
+- `CHROMIUM_BIN` points to valid chromium executable  
+- System will fallback to requests if Selenium unavailable
+
+#### Backend Integration Errors
+**Solution:** 
+- Verify `DOWNLOAD_BACKEND_URL` is accessible
+- Ensure backend supports required API endpoints:
+  - `/api/search`
+  - `/api/download` 
+  - `/api/status`
+
+#### Private Goodreads Content
+**Solution:** For private shelves, perform initial login with Selenium and save cookies to `cache/logins/goodreads/cookies.pkl`
+
+### Getting Help
+
+When seeking assistance, please provide:
+
+1. **Project summary** (copy from above)
+2. **Relevant code paths** (e.g., `src/scrapers/goodreads.py`)
+3. **Recent logs** (last 50 lines showing the error)
+4. **Exact steps taken** (environment variables, startup method)
+5. **Desired behavior** (what you're trying to achieve)
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+### Development Guidelines
+
+- Follow existing code style and patterns
+- Add tests for new functionality
+- Update documentation for any API changes
+- Ensure Docker builds succeed
+- Test both Selenium and requests fallback modes
+
+## 🗺️ Roadmap
+
+- [ ] **Testing** - Add comprehensive unit tests
+- [ ] **Authentication** - Basic Auth for web interface
+- [ ] **Search Improvements** - Better matching algorithms and manual override
+- [ ] **Background Jobs** - Celery/RQ integration for downloads
+- [ ] **Image Optimization** - Cover resizing and CDN support
+- [ ] **Admin Interface** - Web-based configuration management
+- [ ] **API Documentation** - OpenAPI/Swagger documentation
+- [ ] **Mobile App** - React Native companion app
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- [Goodreads](https://goodreads.com) for the book data
+- [Calibre-Web-Automated](https://github.com/calibrain/calibre-web-automated-book-downloader) for download integration
+- FastAPI and SQLite communities for excellent tools
 
 ---
 
-## Troubleshooting & Common Errors
-
--   **`sqlite3.ProgrammingError: You did not supply a value for binding NN`**
-    -   **Fix:** This is handled by the rewritten Database module which constructs placeholders dynamically and migrates missing columns. If you still encounter this, ensure your DB file is correct. As a last resort, remove the database file to start fresh.
-
--   **Missing covers or permission errors writing to the covers directory**
-    -   **Fix:** Ensure the `/app/data/cache/covers` directory is writable by the application user inside the container. You may need to adjust permissions with `chown` or `chmod`.
-
--   **Selenium errors (e.g., Chromedriver missing)**
-    -   **Fix:** Ensure the `CHROMEDRIVER_PATH` environment variable matches the path to the installed chromedriver binary and `CHROMIUM_BIN` points to your chrome/chromium executable. The scraper will fall back to using `requests` if Selenium is not available.
-
--   **Login/cookie issues for private Goodreads data**
-    -   **Fix:** The scraper can load and reuse Selenium cookies from `cache/logins/goodreads/cookies.pkl`. To scrape private content, perform an initial login with Selenium locally, save the cookies, and ensure the cookie file is included in your container.
-
--   **Backend integration errors**
-    -   **Fix:** Verify that the `DOWNLOAD_BACKEND_URL` is correct and reachable from the application. The backend must support the `/api/search`, `/api/download`, and `/api/status` endpoints. Alternatively, provide an in-process backend module.
-
--   **"Page shows 30 books but per_page was set to 100"**
-    -   **Fix:** The UI and the scraper have separate `per_page` settings. The default for the UI is 30, while the scraper defaults to 100. Adjust the relevant environment variables to match your expectations.
-
----
-
-## Developer Notes & Next Steps
-
-Here are some recommended improvements:
-
--   [ ] Add unit tests for `Database` methods and scraper parsing logic (especially `_map_row_by_headers`).
--   [ ] Improve the search scoring logic and expose the top-N candidates in the UI to allow for manual override.
--   [ ] Add authentication (Basic Auth or token-based) to the Web UI if exposing it to the internet.
--   [ ] Implement retries and rate-limiting for external requests to avoid IP bans.
--   [ ] Integrate a background worker/queue (e.g., Celery, RQ) for managing download jobs to improve concurrency.
--   [ ] Add optional image resizing/caching and serve static assets through a CDN or reverse-proxy.
--   [ ] Create a small admin/settings page in the UI to edit configuration (like `per_page` values and backend URLs) without restarting the application.
-
----
-
-## File & Directory Reference
-
-### Saved Data Locations
-
--   **Search Requests:** `cache/search_requests/search_<goodreads_id>_<timestamp>.json`
--   **Search Results/Candidates:** `cache/search_requests/candidates_<goodreads_id>_<timestamp>.json`
-
-*These files are invaluable for debugging why the backend failed to find a good match for a book.*
-
-### Quick References
-
--   **DB File Location (default):** `/app/data/databases/goodreads.db`
--   **Cover Directory (default):** `/app/data/cache/covers`
--   **Saved Search Requests:** `/app/data/cache/search_requests/`
-
-### Web UI Endpoints
-
--   **Homepage:** `http://<host>:5000/`
--   **Shelves:** `/shelf/to-download`, `/shelf/to-read`, `/shelf/read`
--   **Downloads Queue:** `/downloads`
--   **Serve Covers:** `/covers/<filename>`
-
----
-
-## How to Ask for Help
-
-When you need assistance, provide the following information to get a concise and helpful response:
-
-1.  **Short project summary:** You can copy the first paragraph of this README.
-2.  **Path to the relevant code:** (e.g., `src/scrapers/goodreads.py`, `src/utils/database.py`, `src/webui/app.py`).
-3.  **A sample of recent logs:** The last 50 lines showing the error or behavior you want to debug.
-4.  **Exact steps you just ran:** How you started the app, environment variables, and whether Selenium is available.
-5.  **The desired behavior:** (e.g., “fix cover download permission”, “improve search scoring”, “make webui list sortable”).
-
-### Example Prompt:
-
-> I run the project with Docker using these envs: `GOODREADS_PER_PAGE=100`, `WEBUI_PER_PAGE=30`, `DOWNLOAD_BACKEND_URL=http://cwa:8080`. The web UI shows 30 per page but scraper logs say it fetched 100 per page. The UI raises `TypeError: get_books_by_shelf() got an unexpected keyword argument 'offset'`. Here are the last 50 log lines: (paste logs here). Please fix any remaining DB function mismatches and make the UI use the DB offset properly.
+**Happy Reading! 📖**

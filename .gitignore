@@ -38,3 +38,6 @@ cache/
 docker_rebuild.sh
 setup_project.sh
 setup_project_script_maker.sh
+
+# Backup files
+*.backup
