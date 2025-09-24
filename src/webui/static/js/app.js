@@ -1,279 +1,281 @@
-// static/js/app.js
-
-document.addEventListener('DOMContentLoaded', function(){
+/*
+ static/js/app.js
+ Centralizes:
+  - WebSocket handling + event dispatch
+  - toast notifications
+  - partial AJAX refresh (refreshPageSection)
+  - bindings for queue/auto-queue buttons and pagination/per-page
+  - pushState support for shelf, downloads, status, search
+*/
+(function () {
   // --- Toast system ---
   const toastContainer = document.createElement('div');
   toastContainer.id = 'toast-container';
   document.body.appendChild(toastContainer);
-
-  function showToast(msg, type="info", timeout=4000){
+  function showToast(msg, type='info', timeout=4000) {
     const t = document.createElement('div');
-    t.className = `toast ${type}`;
+    t.className = 'toast ' + type;
     t.innerText = msg;
     toastContainer.appendChild(t);
-    setTimeout(()=>t.classList.add('visible'), 50);
-    setTimeout(()=>{
-      t.classList.remove('visible');
-      setTimeout(()=>toastContainer.removeChild(t), 300);
-    }, timeout);
+    setTimeout(()=>t.classList.add('visible'),50);
+    setTimeout(()=>{ t.classList.remove('visible'); setTimeout(()=>toastContainer.removeChild(t),300); }, timeout);
   }
   window.showToast = showToast;
 
-  // --- WebSocket Centralized ---
-  const ws = new WebSocket(`ws://${location.host}/ws/updates`);
+  // --- WebSocket ---
+  const wsProto = (location.protocol === 'https:') ? 'wss' : 'ws';
+  const ws = new WebSocket(`${wsProto}://${location.host}/ws/updates`);
   const handlers = {};
-
-  ws.onopen = () => {
-    console.log("WS connected");
-    showToast("✅ Connected to updates", "success", 2000);
-    document.querySelectorAll('#wsStatus').forEach(el=>el.innerText="Connected");
-  };
-  ws.onclose = () => {
-    console.log("WS closed");
-    showToast("⚠️ Lost connection to updates", "danger", 4000);
-    document.querySelectorAll('#wsStatus').forEach(el=>el.innerText="Disconnected");
-  };
-
+  ws.onopen = () => { console.log('WS open'); showToast('Connected to updates','success',1500); };
+  ws.onclose = () => { console.log('WS closed'); showToast('Lost WS connection','danger',3000); };
   ws.onmessage = ev => {
     try {
       const msg = JSON.parse(ev.data);
-      console.log("WS event:", msg);
-      if(msg.event && handlers[msg.event]){
-        handlers[msg.event].forEach(fn => fn(msg));
+      if(msg.event && handlers[msg.event]) handlers[msg.event].forEach(fn=>fn(msg));
+      // generic notifications for some events
+      if(msg.event === 'queued') showToast('Queued: '+(msg.candidate_id||''),'info');
+      if(msg.event === 'sync_done') showToast('Sync finished: '+(msg.shelf||''),'success');
+      if(msg.event === 'config_updated') {
+        const ta = document.getElementById('configTextarea');
+        if(ta) { ta.value = JSON.stringify(msg.config||{}, null, 2); showToast('Config updated (whitelisted)','info'); }
       }
-      // auto-toast some events
-      if(msg.event === "queued"){
-        showToast(`📥 Queued candidate ${msg.candidate_id || ''}`, "info");
-      }
-      if(msg.event === "sync_done"){
-        showToast(`🔄 Sync finished for shelf ${msg.shelf} (${msg.count || 'unknown'} books)`, "success");
-      }
-    } catch(err){
-      console.error("WS parse error", err, ev.data);
-    }
+    } catch(e) { console.error('ws parse', e); }
   };
-
-  function registerHandler(event, fn){
-    if(!handlers[event]) handlers[event] = [];
-    handlers[event].push(fn);
-  }
+  function registerHandler(ev, fn){ if(!handlers[ev]) handlers[ev]=[]; handlers[ev].push(fn); }
   window.wsHandlers = { register: registerHandler };
 
-  // --- Shared refresh helpers ---
-  async function refreshQueue(queueElId){
-    try {
-      const res = await fetch('/api/status_proxy');
-      const j = await res.json();
-      document.getElementById(queueElId).innerText = JSON.stringify(j, null, 2);
-    } catch(e){
-      console.error("Queue refresh failed", e);
-    }
-  }
-
-  async function refreshActive(tableSelector){
-    try {
-      const activeRes = await fetch('/api/active_proxy');
-      const active = await activeRes.json();
-      const tbody = document.querySelector(tableSelector + ' tbody');
-      tbody.innerHTML = '';
-      if(Array.isArray(active.active_downloads)){
-        active.active_downloads.forEach(item=>{
-          const progress = item.progress || 0;
-          const tr = document.createElement('tr');
-          tr.innerHTML = `
-            <td>${item.title||item.id||'unknown'}</td>
-            <td>${item.status||''}</td>
-            <td>
-              <div class="progress-bar"><div class="progress" style="width:${progress}%;"></div></div>
-              ${progress}%
-            </td>
-            <td>${item.priority||0}</td>
-            <td><button class="btn danger" onclick="cancelDownload('${item.id||item.book_id||item.md5}')">Cancel</button></td>
-          `;
-          tbody.appendChild(tr);
-        });
-      } else {
-        tbody.innerHTML = `<tr><td colspan="5">${JSON.stringify(active)}</td></tr>`;
-      }
-    } catch(e){
-      console.error("Active refresh failed", e);
-    }
-  }
-
-  window.refreshUI = { refreshQueue, refreshActive };
-
-  // --- Queue button (manual) ---
-  document.querySelectorAll('.queue-btn').forEach(btn=>{
-    btn.addEventListener('click', async function(e){
-      const tr = e.target.closest('tr');
-      if(!tr) return;
-      const id = tr.dataset.goodreadsId;
-      try {
-        const res = await fetch('/api/download_proxy', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({id: id, priority: 0})
-        });
-        const j = await res.json();
-        if (res.ok) showToast('Queued: ' + (j.status || JSON.stringify(j)), "success");
-        else showToast('Queue error: ' + (j.error || JSON.stringify(j)), "danger");
-      } catch(err){
-        showToast('Network error: ' + err, "danger");
-      }
-    });
-  });
-
-  // --- Auto-queue button ---
-  document.querySelectorAll('.auto-queue-btn').forEach(btn=>{
-    btn.addEventListener('click', async function(e){
-      const tr = e.target.closest('tr');
-      if(!tr) return;
-      const payload = {
-        goodreads_id: tr.dataset.goodreadsId,
-        title: tr.dataset.title,
-        author: tr.dataset.author,
-        isbn: tr.dataset.isbn || '',
-        isbn13: tr.dataset.isbn13 || ''
+  // --- binding helpers ---
+  function bindQueueButtons(scope=document) {
+    // queue
+    scope.querySelectorAll('.queue-btn').forEach(btn=>{
+      btn.onclick = async e=>{
+        const tr = e.target.closest('tr'); if(!tr) return;
+        const id = tr.dataset.goodreadsId;
+        try {
+          const r = await fetch('/api/download_proxy', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id, priority:0 }) });
+          const j = await r.json();
+          showToast('Queued: '+JSON.stringify(j), r.ok ? 'success' : 'danger');
+        } catch(err){ showToast('Network error: '+err,'danger'); }
       };
-      e.target.disabled = true;
-      e.target.innerText = 'Searching...';
-      try {
-        const res = await fetch('/api/search_and_queue', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify(payload)
-        });
-        const j = await res.json();
-        if(res.ok){
-          if(j.queued){
-            showToast('✅ Auto-queued: ' + (j.candidate && (j.candidate.title || j.candidate.id) || 'ok'), "success");
-          } else if(j.candidates){
-            const choose = confirm('No confident match. Queue top candidate?');
-            if(choose && j.candidates.length){
-              const c = j.candidates[0];
-              const qres = await fetch('/api/queue_from_candidate', {
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({candidate_id: c.id})
-              });
-              const qj = await qres.json();
-              showToast('Queued: ' + JSON.stringify(qj), "info");
-            }
-          } else {
-            showToast('Search completed: ' + JSON.stringify(j), "info");
-          }
-        } else {
-          showToast('Search error: ' + JSON.stringify(j), "danger");
+    });
+    // auto-queue
+    scope.querySelectorAll('.auto-queue-btn').forEach(btn=>{
+      btn.onclick = async e=>{
+        const tr = e.target.closest('tr'); if(!tr) return;
+        const payload = { goodreads_id: tr.dataset.goodreadsId, title: tr.dataset.title, author: tr.dataset.author, isbn: tr.dataset.isbn||'' };
+        e.target.disabled = true; e.target.innerText = 'Searching...';
+        try {
+          const r = await fetch('/api/search_and_queue', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+          const j = await r.json();
+          if(r.ok){
+            if(j.queued) showToast('Auto queued: '+(j.candidate && (j.candidate.title||j.candidate.id)||''),'success');
+            else showToast('Search results: '+JSON.stringify(j),'info');
+          } else showToast('Search error: '+JSON.stringify(j),'danger');
+        } catch(err){ showToast('Network error: '+err,'danger'); }
+        finally { e.target.disabled=false; e.target.innerText='Auto Queue'; }
+      };
+    });
+  }
+
+  window.cancelDownload = async function(bookId){
+    if(!bookId) return showToast('Missing id','danger');
+    try {
+      const r = await fetch('/api/download/'+encodeURIComponent(bookId)+'/cancel', { method:'DELETE' });
+      const j = await r.json();
+      showToast('Cancel: '+JSON.stringify(j), r.ok ? 'success' : 'danger');
+    } catch(e){ showToast('Network error: '+e,'danger'); }
+  };
+
+  // --- refreshPageSection(pageType, opts) ---
+  // pageType: 'shelf' (opts: shelf,page,per_page), 'downloads', 'status', 'search' (opts: q)
+  async function refreshPageSection(pageType, opts={}) {
+    try {
+      if(pageType === 'shelf') {
+        const shelf = opts.shelf || (window.location.pathname.split('/').pop()||'to-download');
+        const page = opts.page || (new URLSearchParams(window.location.search).get('page')||1);
+        const per = opts.per_page || (new URLSearchParams(window.location.search).get('per_page')||30);
+        const res = await fetch(`/shelf/${encodeURIComponent(shelf)}/partial?page=${page}&per_page=${per}`);
+        if(!res.ok) throw new Error('partial failed');
+        const html = await res.text();
+        const doc = new DOMParser().parseFromString(html,'text/html');
+        const newTable = doc.querySelector('#shelf-table');
+        if(newTable){
+          const container = document.querySelector('#shelfTableContainer');
+          container.innerHTML = newTable.outerHTML;
+          bindQueueButtons(container);
         }
-      } catch (err){
-        showToast('Network error: ' + err, "danger");
-      } finally {
-        e.target.disabled = false;
-        e.target.innerText = 'Auto Queue';
+        // refresh pagination partials by directly updating links/text (simpler: update url)
+        const newUrl = `/shelf/${encodeURIComponent(shelf)}?page=${page}&per_page=${per}`;
+        history.pushState({page:parseInt(page), per_page:parseInt(per)}, '', newUrl);
+        showToast('Shelf refreshed', 'info');
+        return;
+      }
+
+      if(pageType === 'downloads'){
+        // queue panel
+        const qres = await fetch('/downloads/partials/queue');
+        if(qres.ok){
+          const qhtml = await qres.text();
+          const qdoc = new DOMParser().parseFromString(qhtml,'text/html');
+          const newQ = qdoc.querySelector('#queuePanelContent');
+          const panel = document.querySelector('#queuePanel');
+          if(newQ && panel) panel.innerHTML = newQ.innerHTML;
+        }
+        // active table
+        const tres = await fetch('/downloads/partials/active');
+        if(tres.ok){
+          const thtml = await tres.text();
+          const tdoc = new DOMParser().parseFromString(thtml,'text/html');
+          const newTbody = tdoc.querySelector('tbody');
+          const tbody = document.querySelector('#active-table tbody');
+          if(newTbody && tbody) tbody.innerHTML = newTbody.innerHTML;
+        }
+        history.pushState({}, '', '/downloads');
+        showToast('Downloads refreshed', 'info');
+        return;
+      }
+
+      if(pageType === 'status'){
+        const qres = await fetch('/status/partials/queue');
+        if(qres.ok){
+          const qhtml = await qres.text();
+          const qdoc = new DOMParser().parseFromString(qhtml,'text/html');
+          const newQ = qdoc.querySelector('#queuePanelContent');
+          const panel = document.querySelector('#queuePanel');
+          if(newQ && panel) panel.innerHTML = newQ.innerHTML;
+        }
+        const tres = await fetch('/downloads/partials/active');
+        if(tres.ok){
+          const thtml = await tres.text();
+          const tdoc = new DOMParser().parseFromString(thtml,'text/html');
+          const newTbody = tdoc.querySelector('tbody');
+          const tbody = document.querySelector('#status-active-table tbody');
+          if(newTbody && tbody) tbody.innerHTML = newTbody.innerHTML;
+        }
+        history.pushState({}, '', '/status');
+        showToast('Status refreshed', 'info');
+        return;
+      }
+
+      if(pageType === 'search'){
+        const q = opts.q || '';
+        const res = await fetch(`/manual_search?partial=1&q=${encodeURIComponent(q)}`);
+        if(!res.ok) throw new Error('search partial failed');
+        const html = await res.text();
+        const doc = new DOMParser().parseFromString(html,'text/html');
+        const newRes = doc.querySelector('#manualSearchResult');
+        const target = document.getElementById('manualSearchResult');
+        if(newRes && target) target.innerHTML = newRes.innerHTML;
+        history.pushState({q}, '', `/manual_search?q=${encodeURIComponent(q)}`);
+        bindQueueButtons(target||document);
+        showToast('Search updated', 'info');
+        return;
+      }
+    } catch(e){
+      console.error('refreshPageSection error', e);
+      showToast('Refresh failed: '+e, 'danger');
+    }
+  }
+  window.refreshPageSection = refreshPageSection;
+
+  // --- pagination / per-page binding (shelf) ---
+  function bindPaginationAndPerPage() {
+    document.querySelectorAll('.page-link').forEach(a=>{
+      a.onclick = async ev=>{
+        ev.preventDefault();
+        const url = new URL(a.href, window.location.origin);
+        const params = url.searchParams;
+        const page = params.get('page') || '1';
+        const per = params.get('per_page') || (document.getElementById('per_page_select') && document.getElementById('per_page_select').value) || '30';
+        await refreshPageSection('shelf', { shelf: window.location.pathname.split('/').pop(), page: page, per_page: per });
+      };
+    });
+    const pp = document.getElementById('per_page_select');
+    if(pp){
+      pp.onchange = async function(){
+        const per = this.value;
+        await refreshPageSection('shelf', { shelf: window.location.pathname.split('/').pop(), page: 1, per_page: per });
+      };
+    }
+  }
+
+  // --- initial bindings based on page ---
+  document.addEventListener('DOMContentLoaded', ()=>{
+    bindQueueButtons(document);
+    bindPaginationAndPerPage();
+
+    // Sync WS events to refresh pages
+    wsHandlers.register('queued', ()=>{ if(location.pathname.startsWith('/downloads')||location.pathname.startsWith('/status')) refreshPageSection(location.pathname.startsWith('/downloads')? 'downloads' : 'status'); });
+    wsHandlers.register('sync_done', msg=>{
+      // if on shelf page and this shelf matches, refresh shelf only
+      const currentShelf = location.pathname.split('/').pop();
+      if(location.pathname.startsWith('/shelf') && msg.shelf === currentShelf){
+        refreshPageSection('shelf', { shelf: currentShelf, page: new URLSearchParams(window.location.search).get('page')||1, per_page: new URLSearchParams(window.location.search).get('per_page')||30 });
+      } else {
+        // also refresh downloads/status to pick up new queue items
+        if(location.pathname.startsWith('/downloads')) refreshPageSection('downloads');
+        if(location.pathname.startsWith('/status')) refreshPageSection('status');
+      }
+    });
+
+    // Wire buttons if present
+    const refreshBtn = document.getElementById('refreshBtn');
+    if(refreshBtn) refreshBtn.onclick = ()=>refreshPageSection('downloads');
+    const refreshStatusBtn = document.getElementById('refreshStatusBtn');
+    if(refreshStatusBtn) refreshStatusBtn.onclick = ()=>refreshPageSection('status');
+
+    // Manual search form
+    const sf = document.getElementById('manualSearchForm');
+    if(sf){
+      sf.onsubmit = async ev=>{
+        ev.preventDefault();
+        const q = (document.getElementById('searchQuery')||{}).value || '';
+        if(!q) return;
+        await refreshPageSection('search', { q });
+      };
+      // support restoring query from URL on load
+      const uparams = new URLSearchParams(window.location.search);
+      const q0 = uparams.get('q');
+      if(q0) refreshPageSection('search', { q: q0 });
+    }
+
+    // shelf page: bind sync button
+    const syncBtn = document.getElementById('syncBtn');
+    if(syncBtn){
+      syncBtn.onclick = async ()=>{
+        const shelf = window.location.pathname.split('/').pop();
+        try {
+          const r = await fetch('/sync/'+encodeURIComponent(shelf), { method:'POST' });
+          const j = await r.json();
+          const el = document.getElementById('syncStatus'); if(el) el.innerText = j.status || 'started';
+        } catch(e){ showToast('Sync error: '+e,'danger'); }
+      };
+    }
+
+    // push initial state for shelf
+    if(location.pathname.startsWith('/shelf/')){
+      const page = parseInt(new URLSearchParams(window.location.search).get('page')||'1');
+      const per = parseInt(new URLSearchParams(window.location.search).get('per_page')||'30');
+      history.replaceState({page, per_page: per}, '', window.location.href);
+    } else {
+      history.replaceState({}, '', window.location.href);
+    }
+
+    // popstate handling for back/forward
+    window.addEventListener('popstate', ev=>{
+      const path = location.pathname;
+      if(path.startsWith('/shelf/')){
+        const shelf = path.split('/').pop();
+        const page = ev.state && ev.state.page || new URLSearchParams(window.location.search).get('page') || 1;
+        const per = ev.state && ev.state.per_page || new URLSearchParams(window.location.search).get('per_page') || 30;
+        refreshPageSection('shelf', { shelf, page, per });
+      } else if(path === '/downloads') refreshPageSection('downloads');
+      else if(path === '/status') refreshPageSection('status');
+      else if(path === '/manual_search') {
+        const q = (ev.state && ev.state.q) || new URLSearchParams(window.location.search).get('q') || '';
+        if(q) refreshPageSection('search', { q });
       }
     });
   });
 
-  // --- Per-page select ---
-  const pp = document.getElementById('per_page_select');
-  if(pp){
-    pp.addEventListener('change', function(){
-      const params = new URLSearchParams(window.location.search);
-      params.set('per_page', this.value);
-      params.set('page', '1');
-      window.location.search = params.toString();
-    });
-  }
-
-  // --- Sync button (shelf view) ---
-  const syncBtn = document.getElementById('syncBtn');
-  if(syncBtn){
-    syncBtn.addEventListener('click', async function(ev){
-      ev.preventDefault();
-      const shelf = (window.location.pathname.split('/').pop() || 'to-download');
-      const res = await fetch('/sync/' + encodeURIComponent(shelf), {method:'POST'});
-      const j = await res.json();
-      document.getElementById('syncStatus').innerText = j.status || JSON.stringify(j);
-    });
-    window.wsHandlers.register('sync_done', msg=>{
-      document.getElementById('syncStatus').innerText = '✅ Sync finished for ' + msg.shelf;
-    });
-  }
-
-  // --- Downloads page ---
-  const refreshBtn = document.getElementById('refreshBtn');
-  if(refreshBtn){
-    async function refreshDownloads(){
-      await refreshQueue('queueStatus');
-      await refreshActive('#active-table');
-    }
-    refreshBtn.addEventListener('click', refreshDownloads);
-    window.wsHandlers.register('queued', refreshDownloads);
-    window.wsHandlers.register('sync_done', refreshDownloads);
-  }
-
-  // --- Status page ---
-  const refreshStatusBtn = document.getElementById('refreshStatusBtn');
-  if(refreshStatusBtn){
-    async function refreshStatus(){
-      await refreshQueue('queueData');
-      await refreshActive('#status-active-table');
-    }
-    refreshStatusBtn.addEventListener('click', refreshStatus);
-    window.wsHandlers.register('queued', refreshStatus);
-    window.wsHandlers.register('sync_done', refreshStatus);
-  }
-
-  // --- Manual Search page ---
-  const searchForm = document.getElementById('manualSearchForm');
-  if(searchForm){
-    searchForm.addEventListener('submit', async (ev)=>{
-      ev.preventDefault();
-      const query = document.getElementById('searchQuery').value.trim();
-      if(!query) return;
-      const resultBox = document.getElementById('manualSearchResult');
-      resultBox.innerText = 'Searching...';
-      try {
-        const res = await fetch('/api/search_proxy?query=' + encodeURIComponent(query));
-        const j = await res.json();
-        if(res.ok && Array.isArray(j)){
-          let html = '<h3>Results</h3><table class="books-table"><thead><tr><th>Title</th><th>Author</th><th>Action</th></tr></thead><tbody>';
-          j.forEach(c=>{
-            const id = c.id || c.md5 || '';
-            html += `<tr>
-              <td>${c.title||''}</td>
-              <td>${c.author||''}</td>
-              <td><button class="btn queue-result-btn" data-id="${id}">Queue</button></td>
-            </tr>`;
-          });
-          html += '</tbody></table>';
-          resultBox.innerHTML = html;
-          document.querySelectorAll('.queue-result-btn').forEach(btn=>{
-            btn.addEventListener('click', async ()=>{
-              const candId = btn.dataset.id;
-              const qres = await fetch('/api/queue_from_candidate', {
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({candidate_id: candId})
-              });
-              const qj = await qres.json();
-              showToast('Queued: ' + JSON.stringify(qj), "success");
-            });
-          });
-        } else {
-          resultBox.innerText = JSON.stringify(j);
-        }
-      } catch(err){
-        resultBox.innerText = 'Error: ' + err;
-      }
-    });
-  }
-});
-
-// --- Cancel helper ---
-async function cancelDownload(bookId){
-  if(!bookId) return showToast('Missing book id', "danger");
-  const res = await fetch('/api/download/' + encodeURIComponent(bookId) + '/cancel', {method: 'DELETE'});
-  const j = await res.json();
-  showToast(JSON.stringify(j), res.ok ? "success" : "danger");
-}
+})();

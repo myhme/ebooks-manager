@@ -1,11 +1,19 @@
 {% extends "layout.html" %}
-{% block title %}Shelf: {{ shelf_name }}{% endblock %}
+{% block title %}Shelf - {{ shelf_name }}{% endblock %}
 {% block content %}
   <h2>Shelf: {{ shelf_name }}</h2>
 
   <div class="controls">
-    <button class="btn primary" id="syncBtn">🔄 Sync Now</button>
-    <span id="syncStatus" class="small">Idle</span>
+    <button id="syncBtn" class="btn primary">🔄 Sync Now</button>
+    <label style="margin-left:12px">Per page:
+      <select id="per_page_select">
+        <option value="10" {% if per_page==10 %}selected{% endif %}>10</option>
+        <option value="30" {% if per_page==30 %}selected{% endif %}>30</option>
+        <option value="50" {% if per_page==50 %}selected{% endif %}>50</option>
+        <option value="100" {% if per_page==100 %}selected{% endif %}>100</option>
+      </select>
+    </label>
+    <span id="syncStatus" class="small" style="margin-left:12px">Ready</span>
   </div>
 
   <div id="shelfTableContainer">
@@ -14,11 +22,11 @@
 
   <div id="paginationContainer" class="pagination">
     {% if page > 1 %}
-      <a href="{{ url_for('shelf_view', shelf=shelf_name, page=page-1, per_page=per_page) }}" class="page-link">Prev</a>
+      <a class="page-link" href="/shelf/{{ shelf_name }}?page={{ page-1 }}&per_page={{ per_page }}">Prev</a>
     {% endif %}
     Page {{ page }} / {{ total_pages }}
     {% if page < total_pages %}
-      <a href="{{ url_for('shelf_view', shelf=shelf_name, page=page+1, per_page=per_page) }}" class="page-link">Next</a>
+      <a class="page-link" href="/shelf/{{ shelf_name }}?page={{ page+1 }}&per_page={{ per_page }}">Next</a>
     {% endif %}
   </div>
 {% endblock %}

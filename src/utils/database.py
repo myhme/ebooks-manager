@@ -259,6 +259,21 @@ class Database:
             LOG.exception("Failed to read books by shelf")
             return []
 
+    def count_books_by_shelf(self, shelf: str) -> int:
+        """Return count of books whose shelves field fuzzy-matches shelf.
+        Mirrors filtering logic in get_books_by_shelf (shelves LIKE '%name%').
+        Used by web UI pagination (shelf_view). Safe if shelf is empty.
+        """
+        if not shelf:
+            return 0
+        pattern = f"%{shelf}%"
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT COUNT(1) FROM books WHERE shelves LIKE ?", (pattern,)
+            )
+            row = cur.fetchone()
+        return (row[0] if row and row[0] is not None else 0)
+
     def get_all_books(self, limit: Optional[int] = None, offset: Optional[int] = 0) -> List[Dict[str, Any]]:
         try:
             cur = self.conn.cursor()

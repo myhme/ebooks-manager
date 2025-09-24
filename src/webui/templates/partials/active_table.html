@@ -5,17 +5,11 @@
         <td>{{ item.title or item.id or 'unknown' }}</td>
         <td>{{ item.status or '' }}</td>
         <td>
-          <div class="progress-bar">
-            <div class="progress" style="width:{{ item.progress or 0 }}%;"></div>
-          </div>
+          <div class="progress-bar"><div class="progress" style="width:{{ item.progress or 0 }}%;"></div></div>
           {{ item.progress or 0 }}%
         </td>
         <td>{{ item.priority or 0 }}</td>
-        <td>
-          <button class="btn danger" onclick="cancelDownload('{{ item.id or item.book_id or item.md5 }}')">
-            Cancel
-          </button>
-        </td>
+        <td><button class="btn danger" onclick="cancelDownload('{{ item.id or item.book_id or item.md5 }}')">Cancel</button></td>
       </tr>
     {% endfor %}
   {% else %}

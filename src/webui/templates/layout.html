@@ -1,29 +1,32 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>{% block title %}Goodreads WebUI{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', path='/css/style.css') }}">
-  <script src="{{ url_for('static', path='/js/app.js') }}" defer></script>
+  <meta charset="utf-8">
+  <title>{% block title %}Ebooks Manager{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <script defer src="/static/js/app.js"></script>
 </head>
 <body>
   <header>
-    <h1>📚 Goodreads Sync WebUI</h1>
-    <nav>
-      <a href="{{ url_for('shelf_view', shelf='to-download') }}">Shelves</a> |
-      <a href="{{ url_for('downloads_page') }}">Downloads</a> |
-      <a href="{{ url_for('manual_search_page') }}">Search</a> |
-      <a href="{{ url_for('sync_page') }}">Sync</a> |
-      <a href="{{ url_for('status_page') }}">Status</a>
-    </nav>
-    <hr>
+    <div class="container">
+      <h1>📚 Ebooks Manager</h1>
+      <nav>
+        <a href="/shelf/to-download">Shelves</a> |
+        <a href="/downloads">Downloads</a> |
+        <a href="/manual_search">Search</a> |
+        <a href="/sync">Sync</a> |
+        <a href="/status">Status</a> |
+        <a href="/admin/config">Config API</a>
+      </nav>
+    </div>
   </header>
-  <main>
+
+  <main class="container">
     {% block content %}{% endblock %}
   </main>
+
   <footer>
-    <hr>
-    <p style="font-size:0.9em;color:#666">Goodreads Sync &middot; WebUI</p>
+    <div class="container"><small>© Ebooks Manager</small></div>
   </footer>
 </body>
 </html>

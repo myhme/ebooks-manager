@@ -1,19 +1,19 @@
 {% extends "layout.html" %}
 {% block title %}Downloads{% endblock %}
 {% block content %}
-  <h2>Active Downloads</h2>
-  <button id="refreshBtn" class="btn">🔄 Refresh</button>
+  <h2>Downloads</h2>
+  <div class="controls">
+    <button id="refreshBtn" class="btn">🔄 Refresh</button>
+  </div>
 
   <h3>Queue</h3>
-  {% include "partials/queue_panel.html" %}
+  <div id="queuePanel">
+    {% include "partials/queue_panel.html" %}
+  </div>
 
   <h3>Active</h3>
   <table id="active-table" class="books-table">
-    <thead>
-      <tr>
-        <th>Title</th><th>Status</th><th>Progress</th><th>Priority</th><th>Action</th>
-      </tr>
-    </thead>
+    <thead><tr><th>Book</th><th>Status</th><th>Progress</th><th>Priority</th><th>Action</th></tr></thead>
     {% include "partials/active_table.html" %}
   </table>
 {% endblock %}

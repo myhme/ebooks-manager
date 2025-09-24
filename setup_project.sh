@@ -41,7 +41,9 @@ mkdir -p "data/cache/webpages/goodreads/others"
 mkdir -p "data/cache/webpages/goodreads/ebooks"
 mkdir -p "data/databases"
 mkdir -p "scripts"
+mkdir -p ".devcontainer"
 mkdir -p "config"
+mkdir -p ".vscode"
 mkdir -p "logs"
 mkdir -p "logs/screenshots"
 mkdir -p "src"
@@ -49,6 +51,7 @@ mkdir -p "src/api"
 mkdir -p "src/scrapers"
 mkdir -p "src/webui"
 mkdir -p "src/webui/templates"
+mkdir -p "src/webui/templates/partials"
 mkdir -p "src/webui/static"
 mkdir -p "src/webui/static/css"
 mkdir -p "src/webui/static/js"
@@ -79,35 +82,98 @@ PYTHONUNBUFFERED=1
 WEBPAGE_CACHE_DAYS=30
 EOF
 
+echo "Creating file: Makefile"
+cat << 'EOF' > "Makefile"
+# Makefile for ebooks-manager dev workflow
+
+# Default target
+.PHONY: rebuild
+rebuild:
+	@echo "🔨 Rebuilding ebooks-manager (normal mode)..."
+	@./docker_rebuild.sh
+
+.PHONY: debug
+debug:
+	@echo "🐞 Rebuilding ebooks-manager (debug mode)..."
+	@./docker_rebuild.sh --debug
+
+.PHONY: up
+up:
+	@echo "🚀 Starting ebooks-manager without rebuild..."
+	@docker compose -f /mnt/data/docker/docker-scripts/docker-compose.yml \
+	               -f .devcontainer/docker-compose.override.yml \
+	               up -d ebooks-manager
+
+.PHONY: down
+down:
+	@echo "🛑 Stopping ebooks-manager..."
+	@docker compose -f /mnt/data/docker/docker-scripts/docker-compose.yml \
+	               -f .devcontainer/docker-compose.override.yml \
+	               down ebooks-manager
+
+.PHONY: logs
+logs:
+	@docker compose -f /mnt/data/docker/docker-scripts/docker-compose.yml \
+	               -f .devcontainer/docker-compose.override.yml \
+	               logs -f ebooks-manager
+EOF
+
 echo "Creating file: scripts/entrypoint.sh"
 cat << 'EOF' > "scripts/entrypoint.sh"
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 
-# Run bootstrap with error logging
-echo "Running bootstrap..."
+: "${FLASK_HOST:=0.0.0.0}"
+: "${FLASK_PORT:=5002}"
+: "${UVICORN_WORKERS:=2}"
+
+echo "🚀 Starting ebooks-manager (DEBUG=$DEBUG)"
+
+# 1. Run bootstrap
+echo "📦 Running bootstrap..."
 if ! python /app/src/bootstrap.py; then
-    echo "Bootstrap failed, exiting."
+    echo "❌ Bootstrap failed, exiting."
     exit 1
 fi
 
-# Ensure config file exists
+# 2. Ensure config.json exists
 if [ ! -f /app/config/config.json ]; then
     cp /app/config/config.json.template /app/config/config.json
-    echo "Created config.json from template. Please update it with your credentials or use environment variables."
+    echo "⚠️ Created /app/config/config.json from template."
+    echo "👉 Please update it with your credentials or override via environment variables."
     exit 1
 fi
 
-# Start Uvicorn WebUI in background
-echo "Starting Uvicorn..."
-uvicorn src.webui.app:app \
-    --host 0.0.0.0 \
-    --port 5002 \
-    --workers ${UVICORN_WORKERS:-2} &
+# 3. Start processes
+if [ "$DEBUG" = "true" ]; then
+    echo "🐞 Debug mode enabled"
 
-# Start scheduler in foreground
-echo "Starting scheduler..."
-exec python3 /app/src/job_runner.py
+    # WebUI with debugpy (port 5678)
+    echo "➡️  Starting WebUI under debugpy on port 5678..."
+    python -m debugpy --listen 0.0.0.0:5678 --wait-for-client \
+        -m uvicorn src.webui.app:app \
+        --host "$FLASK_HOST" \
+        --port "$FLASK_PORT" \
+        --reload &
+
+    # Scheduler with debugpy (port 5679)
+    echo "➡️  Starting Scheduler under debugpy on port 5679..."
+    exec python -m debugpy --listen 0.0.0.0:5679 --wait-for-client \
+        /app/src/job_runner.py
+else
+    echo "⚡ Normal mode"
+
+    # WebUI normally (background)
+    echo "➡️  Starting WebUI..."
+    uvicorn src.webui.app:app \
+        --host "$FLASK_HOST" \
+        --port "$FLASK_PORT" \
+        --workers "$UVICORN_WORKERS" &
+
+    # Scheduler in foreground
+    echo "➡️  Starting Scheduler..."
+    exec python3 /app/src/job_runner.py
+fi
 EOF
 
 echo "Creating file: scripts/script.sh"
@@ -117,6 +183,151 @@ set -e
 
 # Example script for running the project or performing maintenance tasks
 exec python3 /app/src/main.py
+EOF
+
+echo "Creating file: .devcontainer/docker-compose.override.debug.yml"
+cat << 'EOF' > ".devcontainer/docker-compose.override.debug.yml"
+services:
+  ebooks-manager:
+    container_name: ebooks-manager
+    image: ebooks-manager:dev
+    build:
+      context: /mnt/data/build/ebooks-manager
+      dockerfile: /mnt/data/build/ebooks-manager/Dockerfile
+
+    volumes:
+      - /mnt/data/build/ebooks-manager:/app:cached
+      - /mnt/data/docker/docker-config/ebooks-manager/config:/app/config
+      - /mnt/data/docker/docker-config/ebooks-manager/logs:/app/logs
+      - /mnt/data/docker/docker-config/ebooks-manager/data:/app/data
+
+    environment:
+      - UID=1000
+      - GID=1000
+      - TZ=Asia/Kolkata
+      - PYTHONUNBUFFERED=1
+      - DEBUG=true   # 👈 toggles entrypoint to run debugpy
+
+    network_mode: "service:adguardhome_essential"
+    entrypoint: ["/app/scripts/entrypoint.sh"]
+EOF
+
+echo "Creating file: .devcontainer/devcontainer.json"
+cat << 'EOF' > ".devcontainer/devcontainer.json"
+{
+    "name": "ebooks-manager-dev",
+    "dockerComposeFile": [
+        "/mnt/data/docker/docker-scripts/docker-compose.yml",
+        "/mnt/data/build/ebooks-manager/.devcontainer/docker-compose.override.yml"
+    ],
+    "service": "ebooks-manager",
+    "workspaceFolder": "/app",
+    "remoteUser": "appuser",
+    "updateRemoteUserUID": true,
+    "remoteEnv": {
+        "DOCKER_HOST": "unix:///var/run/docker.sock"
+    },
+    "forwardPorts": [
+        5002,
+        5678,
+        5679
+    ],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-python.debugpy",
+                "ms-azuretools.vscode-docker"
+            ]
+        }
+    },
+    "postCreateCommand": "pip install -r requirements.txt || true"
+}EOF
+
+echo "Creating file: .devcontainer/docker-compose.override.yml"
+cat << 'EOF' > ".devcontainer/docker-compose.override.yml"
+services:
+  ebooks-manager:
+    container_name: ebooks-manager
+    image: ebooks-manager:dev
+    build:
+      context: /mnt/data/build/ebooks-manager
+      dockerfile: /mnt/data/build/ebooks-manager/Dockerfile
+
+    volumes:
+      - /mnt/data/build/ebooks-manager:/app:cached
+      - /mnt/data/docker/docker-config/ebooks-manager/config:/app/config
+      - /mnt/data/docker/docker-config/ebooks-manager/logs:/app/logs
+      - /mnt/data/docker/docker-config/ebooks-manager/data:/app/data
+
+    environment:
+      - UID=1000
+      - GID=1000
+      - TZ=Asia/Kolkata
+      - PYTHONUNBUFFERED=1
+      - DEBUG=false
+
+    network_mode: "service:adguardhome_essential"
+    entrypoint: ["/app/scripts/entrypoint.sh"]EOF
+
+echo "Creating file: docker_rebuild.sh"
+cat << 'EOF' > "docker_rebuild.sh"
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- Detect if inside VS Code Dev Container ---
+if grep -q "CODESPACES" <(env) || grep -q "DEVCONTAINER" <(env); then
+  echo "🛠 Running inside Dev Container"
+  BASE_PATH="/app"
+else
+  echo "💻 Running on host"
+  BASE_PATH="/mnt/data/build/ebooks-manager"
+fi
+
+# --- Env file ---
+ENV_FILE="$BASE_PATH/.env"
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "❌ Missing .env file at $ENV_FILE"
+  exit 1
+fi
+
+echo "🔹 Using environment file: $ENV_FILE"
+echo "---------------------------"
+cat "$ENV_FILE"
+echo "---------------------------"
+
+# --- Compose files ---
+MAIN_COMPOSE="/mnt/data/docker/docker-scripts/docker-compose.yml"
+OVERRIDE_COMPOSE="$BASE_PATH/.devcontainer/docker-compose.override.yml"
+DEBUG_COMPOSE="$BASE_PATH/.devcontainer/docker-compose.override.debug.yml"
+
+# Default compose args
+COMPOSE_ARGS=(-f "$MAIN_COMPOSE" -f "$OVERRIDE_COMPOSE")
+
+# If --debug flag is passed, also include debug override
+if [[ "${1:-}" == "--debug" ]]; then
+  echo "🐞 Debug mode enabled"
+  COMPOSE_ARGS+=(-f "$DEBUG_COMPOSE")
+fi
+
+# --- Stop & cleanup old container ---
+echo "🛑 Stopping and removing any existing ebooks-manager container..."
+docker compose "${COMPOSE_ARGS[@]}" rm -sf ebooks-manager || true
+
+# --- Cleanup dangling images ---
+echo "🧹 Cleaning up dangling images..."
+docker image prune -f >/dev/null 2>&1 || true
+
+# --- Rebuild ---
+echo "🔨 Rebuilding ebooks-manager image..."
+docker compose "${COMPOSE_ARGS[@]}" build ebooks-manager
+
+# --- Restart ---
+echo "🚀 Starting ebooks-manager container..."
+docker compose "${COMPOSE_ARGS[@]}" up -d ebooks-manager
+
+echo "✅ ebooks-manager is rebuilt and running!"
 EOF
 
 echo "Creating file: config/config.json.template"
@@ -133,6 +344,103 @@ cat << 'EOF' > "config/config.json.template"
     "history_file": "/app/logs/history.json",
     "cache_dir": "/app/data/cache",
     "goodreads_per_page": 100
+}EOF
+
+echo "Creating file: .vscode/launch.json"
+cat << 'EOF' > ".vscode/launch.json"
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Attach: ebooks-manager WebUI",
+            "type": "python",
+            "request": "attach",
+            "connect": {
+                "host": "localhost",
+                "port": 5678
+            },
+            "pathMappings": [
+                {
+                    "localRoot": "${workspaceFolder}",
+                    "remoteRoot": "/app"
+                }
+            ]
+        },
+        {
+            "name": "Attach: ebooks-manager Scheduler",
+            "type": "python",
+            "request": "attach",
+            "connect": {
+                "host": "localhost",
+                "port": 5679
+            },
+            "pathMappings": [
+                {
+                    "localRoot": "${workspaceFolder}",
+                    "remoteRoot": "/app"
+                }
+            ]
+        }
+    ],
+    "compounds": [
+        {
+            "name": "Attach: WebUI + Scheduler",
+            "configurations": [
+                "Attach: ebooks-manager WebUI",
+                "Attach: ebooks-manager Scheduler"
+            ]
+        }
+    ]
+}EOF
+
+echo "Creating file: .vscode/settings.json"
+cat << 'EOF' > ".vscode/settings.json"
+{
+    "dev.containers.dockerPath": "/usr/bin/docker",
+    "dev.containers.remoteEnv": {
+        "DOCKER_HOST": "unix:///var/run/docker.sock"
+    },
+    "dev.containers.defaultExtensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.debugpy",
+        "ms-azuretools.vscode-docker"
+    ],
+    "remote.workspaceMount": "source=/mnt/data/build/ebooks-manager,target=/app,type=bind,consistency=cached",
+    "remote.workspaceLocation": "/app"
+}EOF
+
+echo "Creating file: .vscode/tasks.json"
+cat << 'EOF' > ".vscode/tasks.json"
+{
+    "name": "ebooks-manager-dev",
+    "dockerComposeFile": [
+        "/mnt/data/docker/docker-scripts/docker-compose.yml",
+        "/mnt/data/build/ebooks-manager/.devcontainer/docker-compose.override.yml"
+    ],
+    "service": "ebooks-manager",
+    "workspaceFolder": "/app",
+    "remoteUser": "appuser",
+    "updateRemoteUserUID": true,
+    "remoteEnv": {
+        "DOCKER_HOST": "unix:///var/run/docker.sock"
+    },
+    "forwardPorts": [
+        5002,
+        5678,
+        5679
+    ],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-python.debugpy",
+                "ms-azuretools.vscode-docker"
+            ]
+        }
+    },
+    "postCreateCommand": "pip install -r requirements.txt || true"
 }EOF
 
 echo "Creating file: logs/sync_log.txt"
@@ -175,6 +483,7 @@ uvicorn[standard]
 httpx
 jinja2
 python-multipart
+apscheduler
 # Keep existing scraping/DB deps
 beautifulsoup4
 lxml
@@ -186,16 +495,15 @@ EOF
 echo "Creating file: Dockerfile"
 cat << 'EOF' > "Dockerfile"
 # syntax=docker/dockerfile:1
-FROM python:3.11-slim
+
+########################
+# Stage 1: Builder
+########################
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# Create non-root user
-RUN useradd -m -r -u 1000 appuser && \
-    mkdir -p /home/appuser/.cache && \
-    chown -R appuser:appuser /app /home/appuser
-
-# Install Chromium + dependencies for Selenium
+# System deps (Chromium + Selenium requirements)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     gnupg \
@@ -220,26 +528,68 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 \
     libcairo2 \
     libasound2 \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    build-essential \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Verify ChromeDriver exists and set permissions
-RUN if [ ! -f /usr/bin/chromedriver ]; then echo "ChromeDriver not found"; exit 1; fi && \
-    chmod 755 /usr/bin/chromedriver && \
-    chown appuser:appuser /usr/bin/chromedriver
-
-# Install Python dependencies
+# Install Python deps into a clean layer
 COPY requirements.txt .
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \
     pip cache purge
 
-# Copy app code
-COPY . .
-RUN chown -R appuser:appuser /app /home/appuser && \
-    mkdir -p /app/logs && \
-    chown appuser:appuser /app/logs
+########################
+# Stage 2: Runtime
+########################
+FROM python:3.11-slim
 
-# Environment vars
+WORKDIR /app
+
+# Create non-root user
+RUN useradd -m -r -u 1000 appuser && \
+    mkdir -p /home/appuser/.cache && \
+    chown -R appuser:appuser /app /home/appuser
+
+# Install runtime Chromium + minimal system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium \
+    chromium-driver \
+    libglib2.0-0 \
+    libnss3 \
+    libdbus-1-3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libasound2 \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Copy installed site-packages from builder
+COPY --from=builder /usr/local/lib/python3.11 /usr/local/lib/python3.11
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Whitelist COPY (only app code)
+COPY src/ ./src/
+COPY config/ ./config/
+COPY scripts/ ./scripts/
+COPY requirements.txt ./requirements.txt
+COPY .env.example ./.env.example
+COPY src/webui/templates/ ./src/webui/templates/
+COPY src/webui/static/ ./src/webui/static/
+
+RUN chmod +x /app/scripts/entrypoint.sh
+
+# Ensure logs dir exists
+RUN mkdir -p /app/logs && chown appuser:appuser /app/logs
+
+# Env vars
 ENV PYTHONPATH=/app \
     CHROMEDRIVER_PATH=/usr/bin/chromedriver \
     PATH="/home/appuser/.local/bin:$PATH" \
@@ -249,10 +599,10 @@ ENV PYTHONPATH=/app \
 # Switch to non-root
 USER appuser
 
-# Expose WebUI port
+# Expose WebUI
 EXPOSE 5002
 
-# Entrypoint (Uvicorn)
+# Entrypoint
 ENTRYPOINT ["/app/scripts/entrypoint.sh"]
 EOF
 
@@ -1234,7 +1584,6 @@ EOF
 
 echo "Creating file: src/webui/app.py"
 cat << 'EOF' > "src/webui/app.py"
-# src/webui/app.py
 import asyncio
 import json
 import logging
@@ -1243,8 +1592,21 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import httpx
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException, Depends
-from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
+from fastapi import (
+    FastAPI,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    HTTPException,
+    Depends,
+    Form,
+)
+from fastapi.responses import (
+    HTMLResponse,
+    RedirectResponse,
+    FileResponse,
+    JSONResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -1254,15 +1616,20 @@ from starlette.middleware.cors import CORSMiddleware
 from src.utils.database import Database
 from src.scrapers.goodreads import GoodreadsScraper
 
-# Logging
+# --- Logging ---
 LOG = logging.getLogger("webui")
 logging.basicConfig(level=logging.INFO)
 
-# FastAPI app
+# --- FastAPI app ---
 app = FastAPI(
     title="Ebooks Manager WebUI",
     middleware=[
-        Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+        Middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
     ],
 )
 
@@ -1271,12 +1638,13 @@ TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 STATIC_DIR = BASE_DIR / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# Config loader
+# --- Config loader ---
 CONFIG_PATH = Path(os.getenv("APP_CONFIG_JSON", "/app/config/config.json"))
 if not CONFIG_PATH.exists():
     alt = Path.cwd() / "config" / "config.json"
     if alt.exists():
         CONFIG_PATH = alt
+
 
 def load_config() -> Dict[str, Any]:
     try:
@@ -1284,7 +1652,8 @@ def load_config() -> Dict[str, Any]:
     except Exception:
         return {k.lower(): v for k, v in os.environ.items()}
 
-# DB setup
+
+# --- Database ---
 DB_PATH = (
     os.getenv("DATABASE_PATH")
     or os.getenv("database_path")
@@ -1293,12 +1662,13 @@ DB_PATH = (
 )
 _db = Database(DB_PATH)
 
-# Async http client
+# --- Async http client ---
 http_client = httpx.AsyncClient(timeout=30.0)
 
-# Queue + ws connections
+# --- Background task queue ---
 task_queue: "asyncio.Queue[dict]" = asyncio.Queue()
 ws_connections: set[WebSocket] = set()
+
 
 async def queue_worker():
     LOG.info("Queue worker started")
@@ -1306,28 +1676,46 @@ async def queue_worker():
         job = await task_queue.get()
         try:
             if job.get("type") == "queue_candidate":
-                await call_cwa_api("/api/download", "POST", json_body={"id": job["id"], "priority": job.get("priority", 0)})
+                await call_cwa_api(
+                    "/api/download",
+                    "GET",  # downloader expects GET with ?id
+                    params={"id": job["id"], "priority": job.get("priority", 0)},
+                )
                 await broadcast({"event": "queued", "candidate_id": job["id"]})
             elif job.get("type") == "sync_shelf":
                 cfg = load_config()
                 cfg["cache_dir"] = cfg.get("cache_dir", "/app/data/cache")
                 gs = GoodreadsScraper(cfg)
                 loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, gs.get_goodreads_books_from_shelf, job["shelf"], False, 200)
-                await broadcast({"event": "sync_done", "shelf": job["shelf"]})
+
+                # run sync in thread, return list of books
+                def run_sync():
+                    return gs.get_goodreads_books_from_shelf(job["shelf"], False, 200)
+
+                result = await loop.run_in_executor(None, run_sync)
+                synced_count = len(result) if isinstance(result, (list, tuple)) else 0
+
+                await broadcast({
+                    "event": "sync_done",
+                    "shelf": job["shelf"],
+                    "count": synced_count,
+                })
         except Exception:
             LOG.exception("Worker error")
         finally:
             task_queue.task_done()
 
+
 @app.on_event("startup")
 async def on_startup():
     app.state.worker_task = asyncio.create_task(queue_worker())
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
     app.state.worker_task.cancel()
     await http_client.aclose()
+
 
 # --- Helpers ---
 def _get_cwa_config():
@@ -1337,7 +1725,7 @@ def _get_cwa_config():
     pw = cfg.get("cwa_password") or os.getenv("CWA_PASSWORD")
 
     if not base:
-        LOG.error("❌ No cwa_api_url configured in config.json or env. Backend calls will fail.")
+        LOG.error("❌ No cwa_api_url configured. Backend calls will fail.")
         return None, user, pw
 
     LOG.info("✅ Using CWA backend at %s", base)
@@ -1372,15 +1760,16 @@ async def call_cwa_api(
         if "application/json" in r.headers.get("content-type", ""):
             return True, r.status_code, r.json()
         return True, r.status_code, r.text
-
     except httpx.RequestError as e:
         LOG.error("❌ Backend call failed: %s", e)
         return False, 502, str(e)
+
 
 # --- Admin Auth ---
 security = HTTPBasic()
 ADMIN_USER = os.getenv("ADMIN_USER")
 ADMIN_PASS = os.getenv("ADMIN_PASS")
+
 
 def check_basic_auth(creds: HTTPBasicCredentials = Depends(security)):
     if not ADMIN_USER or not ADMIN_PASS:
@@ -1389,21 +1778,34 @@ def check_basic_auth(creds: HTTPBasicCredentials = Depends(security)):
         return True
     raise HTTPException(401, "Unauthorized")
 
+
 # --- Routes ---
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
+async def index():
     return RedirectResponse("/shelf/to-download")
+
 
 @app.get("/shelf/{shelf}", response_class=HTMLResponse)
 async def shelf_view(request: Request, shelf: str, page: int = 1, per_page: int = 30):
     loop = asyncio.get_running_loop()
-    books = await loop.run_in_executor(None, _db.get_books_by_shelf, shelf, per_page, (page-1)*per_page)
+    books = await loop.run_in_executor(
+        None, _db.get_books_by_shelf, shelf, per_page, (page - 1) * per_page
+    )
     total = await loop.run_in_executor(None, _db.count_books_by_shelf, shelf)
     total_pages = max(1, (total + per_page - 1) // per_page)
+    offset = (page - 1) * per_page
     return TEMPLATES.TemplateResponse(
         "shelf_view.html",
-        {"request": request, "shelf_name": shelf, "books": books, "page": page, "total_pages": total_pages},
+        {
+            "request": request,
+            "shelf_name": shelf,
+            "books": books,
+            "page": page,
+            "total_pages": total_pages,
+            "offset": offset,
+        },
     )
+
 
 @app.get("/covers/{path:path}")
 async def serve_cover(path: str, auth: bool = Depends(check_basic_auth)):
@@ -1413,18 +1815,69 @@ async def serve_cover(path: str, auth: bool = Depends(check_basic_auth)):
         raise HTTPException(404)
     return FileResponse(str(f))
 
+
+@app.get("/downloads", response_class=HTMLResponse)
+async def downloads_page(request: Request):
+    return TEMPLATES.TemplateResponse("downloads.html", {"request": request})
+
+
+@app.get("/manual_search", response_class=HTMLResponse)
+async def manual_search_page(request: Request):
+    return TEMPLATES.TemplateResponse("search.html", {"request": request})
+
+
+@app.get("/sync", response_class=HTMLResponse)
+async def sync_page(request: Request):
+    return TEMPLATES.TemplateResponse("sync.html", {"request": request})
+
+
+@app.get("/status", response_class=HTMLResponse)
+async def status_page(request: Request):
+    return TEMPLATES.TemplateResponse("status.html", {"request": request})
+
+
+# --- Proxy API Endpoints ---
+@app.get("/api/search_proxy")
+async def api_search_proxy(query: str):
+    ok, code, data = await call_cwa_api("api/search", params={"query": query})
+    return JSONResponse(status_code=code, content=data if ok else {"error": data})
+
+
+@app.post("/api/download_proxy")
+async def api_download_proxy(book_id: str = Form(...)):
+    ok, code, data = await call_cwa_api(
+        "api/download", method="GET", params={"id": book_id}
+    )
+    return JSONResponse(status_code=code, content=data if ok else {"error": data})
+
+
+@app.get("/api/status_proxy")
+async def api_status_proxy():
+    ok, code, data = await call_cwa_api("api/status")
+    return JSONResponse(status_code=code, content=data if ok else {"error": data})
+
+
+@app.get("/api/active_proxy")
+async def api_active_proxy():
+    ok, code, data = await call_cwa_api("api/downloads/active")
+    return JSONResponse(status_code=code, content=data if ok else {"error": data})
+
+
+# --- Search + Queue APIs ---
 @app.post("/api/search_and_queue")
 async def api_search_and_queue(payload: dict):
     title = payload.get("title", "")
     author = payload.get("author", "")
     isbn = payload.get("isbn", payload.get("isbn13", ""))
-    goodreads_id = str(payload.get("goodreads_id") or "")
     query = isbn if isbn else f"{title} {author}".strip()
 
     params = {"query": query}
-    if title: params["title"] = title
-    if author: params["author"] = author
-    if isbn: params["isbn"] = isbn
+    if title:
+        params["title"] = title
+    if author:
+        params["author"] = author
+    if isbn:
+        params["isbn"] = isbn
 
     ok, _, resp = await call_cwa_api("/api/search", "GET", params=params)
     if not ok:
@@ -1444,28 +1897,37 @@ async def api_search_and_queue(payload: dict):
             s += 400
         return s
 
-    best_score, best_cand = max(((score(c), c) for c in candidates), key=lambda t: t[0])
+    best_score, best_cand = max(
+        ((score(c), c) for c in candidates), key=lambda t: t[0]
+    )
     if best_score >= int(load_config().get("auto_queue_score_threshold", 600)):
         cand_id = best_cand.get("id") or best_cand.get("md5")
         if cand_id:
-            await task_queue.put({"type": "queue_candidate", "id": cand_id, "priority": 0})
+            await task_queue.put(
+                {"type": "queue_candidate", "id": cand_id, "priority": 0}
+            )
             return {"queued": True, "candidate": best_cand}
     return {"queued": False, "candidates": candidates[:6]}
+
 
 @app.post("/api/queue_from_candidate")
 async def api_queue_from_candidate(payload: dict):
     cand_id = payload.get("candidate_id") or payload.get("id")
     if not cand_id:
         raise HTTPException(400, "candidate_id required")
-    await task_queue.put({"type": "queue_candidate", "id": cand_id, "priority": payload.get("priority", 0)})
+    await task_queue.put(
+        {"type": "queue_candidate", "id": cand_id, "priority": payload.get("priority", 0)}
+    )
     return {"queued": True, "id": cand_id}
+
 
 @app.post("/sync/{shelf}")
 async def trigger_sync(shelf: str):
     await task_queue.put({"type": "sync_shelf", "shelf": shelf})
     return {"status": "sync_started", "shelf": shelf}
 
-# --- WebSocket ---
+
+# --- WebSocket updates ---
 @app.websocket("/ws/updates")
 async def ws_updates(ws: WebSocket):
     await ws.accept()
@@ -1475,6 +1937,7 @@ async def ws_updates(ws: WebSocket):
             await ws.receive_text()
     except WebSocketDisconnect:
         ws_connections.discard(ws)
+
 
 async def broadcast(message: dict):
     dead = []
@@ -1486,10 +1949,12 @@ async def broadcast(message: dict):
     for ws in dead:
         ws_connections.discard(ws)
 
+
 # --- Config admin ---
 @app.get("/admin/config")
 async def get_config(auth: bool = Depends(check_basic_auth)):
     return load_config()
+
 
 @app.post("/admin/config")
 async def write_config(payload: Dict[str, Any], auth: bool = Depends(check_basic_auth)):
@@ -1506,14 +1971,14 @@ cat << 'EOF' > "src/webui/templates/layout.html"
 <head>
   <meta charset="UTF-8">
   <title>{% block title %}Goodreads WebUI{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-  <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/style.css') }}">
+  <script src="{{ url_for('static', path='/js/app.js') }}" defer></script>
 </head>
 <body>
   <header>
     <h1>📚 Goodreads Sync WebUI</h1>
     <nav>
-      <a href="{{ url_for('shelf_view', shelf_name='to-download') }}">Shelves</a> |
+      <a href="{{ url_for('shelf_view', shelf='to-download') }}">Shelves</a> |
       <a href="{{ url_for('downloads_page') }}">Downloads</a> |
       <a href="{{ url_for('manual_search_page') }}">Search</a> |
       <a href="{{ url_for('sync_page') }}">Sync</a> |
@@ -1534,46 +1999,48 @@ EOF
 
 echo "Creating file: src/webui/templates/sync.html"
 cat << 'EOF' > "src/webui/templates/sync.html"
-{# templates/sync.html #}
 {% extends "layout.html" %}
 {% block title %}Sync{% endblock %}
 {% block content %}
-  <h2>Manual Sync</h2>
-  <p>Trigger a bookshelf sync for a shelf:</p>
-  <form id="syncForm">
-    <label>Shelf name: <input name="shelf" value="to-download"></label>
-    <button class="btn" type="submit">Start Sync</button>
-  </form>
-  <div id="syncResult" class="small"></div>
+  <h2>Goodreads Sync</h2>
 
-  <script>
-    document.getElementById('syncForm').addEventListener('submit', async (ev)=>{
-      ev.preventDefault();
-      const fd = new FormData(ev.target);
-      const shelf = fd.get('shelf');
-      document.getElementById('syncResult').innerText = 'Starting...';
-      const res = await fetch('/sync/' + encodeURIComponent(shelf), {method: 'POST'});
-      const j = await res.json();
-      document.getElementById('syncResult').innerText = JSON.stringify(j);
-    });
-  </script>
+  <div class="controls">
+    <button id="syncAllBtn" class="btn primary">🔄 Sync All Shelves</button>
+  </div>
+
+  <div id="syncStatus" class="status-panel small">Ready</div>
 {% endblock %}
 EOF
 
 echo "Creating file: src/webui/templates/shelves.html"
 cat << 'EOF' > "src/webui/templates/shelves.html"
-{# templates/shelves.html #}
 {% extends "layout.html" %}
 {% block title %}Shelves{% endblock %}
 {% block content %}
-  <h2>Shelves</h2>
-  <p>Quick links to common shelves:</p>
-  <ul>
-    <li><a href="{{ url_for('shelf_view', shelf_name='to-download') }}">to-download</a></li>
-    <li><a href="{{ url_for('shelf_view', shelf_name='to-read') }}">to-read</a></li>
-    <li><a href="{{ url_for('shelf_view', shelf_name='read') }}">read</a></li>
-    <li><a href="{{ url_for('shelf_view', shelf_name='owned') }}">owned</a></li>
-  </ul>
+  <h2>All Shelves</h2>
+
+  <table class="books-table" data-shelves="1">
+    <thead>
+      <tr>
+        <th>Shelf</th>
+        <th>Books</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for shelf in shelves %}
+        <tr data-shelf="{{ shelf.name }}">
+          <td><a href="{{ url_for('shelf_view', shelf=shelf.name) }}">{{ shelf.name }}</a></td>
+          <td>{{ shelf.count }}</td>
+          <td>
+            <form method="post" action="{{ url_for('trigger_sync', shelf=shelf.name) }}" class="inline-form">
+              <button class="btn primary">🔄 Sync</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 {% endblock %}
 EOF
 
@@ -1583,92 +2050,163 @@ cat << 'EOF' > "src/webui/templates/search.html"
 {% block title %}Manual Search{% endblock %}
 {% block content %}
   <h2>Manual Search</h2>
-  <form id="manualSearchForm">
-    <label>Query: <input type="text" name="query" style="width:300px"></label>
-    <button class="btn primary" type="submit">Search</button>
+  <form id="manualSearchForm" class="controls">
+    <input id="searchQuery" type="text" placeholder="Enter title, author, or ISBN">
+    <button id="searchBtn" class="btn primary" type="submit">Search</button>
   </form>
-
-  <div id="manualSearchResult" style="margin-top:1em;"></div>
-
-  <script>
-    document.getElementById('manualSearchForm').addEventListener('submit', async (ev)=>{
-      ev.preventDefault();
-      const q = ev.target.query.value.trim();
-      if(!q) return;
-      document.getElementById('manualSearchResult').innerText = 'Searching...';
-      const res = await fetch('/api/manual_search', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({query:q})
-      });
-      const j = await res.json();
-      if(res.ok){
-        let html = '<h3>Results</h3><table class="books-table"><thead><tr><th>Title</th><th>Author</th><th>Action</th></tr></thead><tbody>';
-        if(Array.isArray(j.candidates)){
-          j.candidates.forEach(c=>{
-            html += `<tr><td>${c.title||''}</td><td>${c.author||''}</td>
-                       <td><button class="btn" onclick="queueCandidate('${c.id||c.md5||''}')">Queue</button></td></tr>`;
-          });
-        }
-        html += '</tbody></table>';
-        document.getElementById('manualSearchResult').innerHTML = html;
-      } else {
-        document.getElementById('manualSearchResult').innerText = 'Error: ' + JSON.stringify(j);
-      }
-    });
-
-    async function queueCandidate(id){
-      if(!id) return alert('Missing candidate id');
-      const res = await fetch('/api/queue_from_candidate', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({candidate_id:id})
-      });
-      const j = await res.json();
-      alert(JSON.stringify(j));
-    }
-  </script>
+  <div id="manualSearchResult"></div>
 {% endblock %}
 EOF
 
 echo "Creating file: src/webui/templates/downloads.html"
 cat << 'EOF' > "src/webui/templates/downloads.html"
-{# templates/downloads.html #}
 {% extends "layout.html" %}
 {% block title %}Downloads{% endblock %}
 {% block content %}
-  <h2>Download Queue & Status</h2>
-  <p><button id="refreshBtn" class="btn">Refresh</button> <a href="{{ url_for('shelf_view', shelf_name='to-download') }}">Back to Shelves</a></p>
-
-  <div id="backendStatus" class="info small">Checking backend...</div>
+  <h2>Active Downloads</h2>
+  <button id="refreshBtn" class="btn">🔄 Refresh</button>
 
   <h3>Queue</h3>
-  <pre id="queueStatus">Loading...</pre>
+  {% include "partials/queue_panel.html" %}
 
-  <h3>Active Downloads</h3>
-  <table class="books-table" id="active-table">
-    <thead><tr><th>Title</th><th>Status</th><th>Progress</th><th>Priority</th><th>Action</th></tr></thead>
-    <tbody></tbody>
+  <h3>Active</h3>
+  <table id="active-table" class="books-table">
+    <thead>
+      <tr>
+        <th>Title</th><th>Status</th><th>Progress</th><th>Priority</th><th>Action</th>
+      </tr>
+    </thead>
+    {% include "partials/active_table.html" %}
   </table>
 {% endblock %}
 EOF
 
+echo "Creating file: src/webui/templates/partials/shelf_table.html"
+cat << 'EOF' > "src/webui/templates/partials/shelf_table.html"
+{# templates/partials/shelf_table.html #}
+<table class="books-table">
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Cover</th>
+      <th>Title</th>
+      <th>Author</th>
+      <th>Series</th>
+      <th>Shelves</th>
+      <th>Added</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for book in books %}
+      <tr data-goodreads-id="{{ book.goodreads_id }}"
+          data-title="{{ book.title }}"
+          data-author="{{ book.author }}"
+          data-isbn="{{ book.isbn }}"
+          data-isbn13="{{ book.isbn13 }}">
+        <td>{{ offset + loop.index }}</td>
+        <td>
+          {% if book.cover_local_path %}
+            <img src="{{ url_for('serve_cover', path=book.cover_local_path) }}" class="cover">
+          {% else %}
+            —
+          {% endif %}
+        </td>
+        <td>
+          <a href="https://www.goodreads.com/book/show/{{ book.goodreads_id }}" target="_blank">
+            {{ book.title }}
+          </a>
+        </td>
+        <td>{{ book.author }}</td>
+        <td>
+          {% if book.series_name %}
+            {{ book.series_name }} #{{ book.series_number }}
+          {% endif %}
+        </td>
+        <td>{{ book.shelves }}</td>
+        <td>{{ book.added|default('') }}</td>
+        <td>
+          <button class="btn queue-btn">Queue</button>
+          <button class="btn auto-queue-btn">Auto Queue</button>
+        </td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+EOF
+
+echo "Creating file: src/webui/templates/partials/pagination.html"
+cat << 'EOF' > "src/webui/templates/partials/pagination.html"
+<div id="paginationContainer" class="pagination">
+  {% if page > 1 %}
+    <a href="{{ url_for('shelf_view', shelf=shelf_name, page=page-1, per_page=per_page) }}" class="page-link">Prev</a>
+  {% endif %}
+  Page {{ page }} / {{ total_pages }}
+  {% if page < total_pages %}
+    <a href="{{ url_for('shelf_view', shelf=shelf_name, page=page+1, per_page=per_page) }}" class="page-link">Next</a>
+  {% endif %}
+</div>
+EOF
+
+echo "Creating file: src/webui/templates/partials/active_table.html"
+cat << 'EOF' > "src/webui/templates/partials/active_table.html"
+<tbody>
+  {% if active_downloads %}
+    {% for item in active_downloads %}
+      <tr>
+        <td>{{ item.title or item.id or 'unknown' }}</td>
+        <td>{{ item.status or '' }}</td>
+        <td>
+          <div class="progress-bar">
+            <div class="progress" style="width:{{ item.progress or 0 }}%;"></div>
+          </div>
+          {{ item.progress or 0 }}%
+        </td>
+        <td>{{ item.priority or 0 }}</td>
+        <td>
+          <button class="btn danger" onclick="cancelDownload('{{ item.id or item.book_id or item.md5 }}')">
+            Cancel
+          </button>
+        </td>
+      </tr>
+    {% endfor %}
+  {% else %}
+    <tr><td colspan="5">No active downloads</td></tr>
+  {% endif %}
+</tbody>
+EOF
+
+echo "Creating file: src/webui/templates/partials/queue_panel.html"
+cat << 'EOF' > "src/webui/templates/partials/queue_panel.html"
+<div class="status-panel" id="queuePanel">
+  {% if queue_data %}
+    <pre>{{ queue_data | tojson(indent=2) }}</pre>
+  {% else %}
+    <pre>No queue data available</pre>
+  {% endif %}
+</div>
+EOF
+
 echo "Creating file: src/webui/templates/status.html"
 cat << 'EOF' > "src/webui/templates/status.html"
-{# templates/status.html #}
 {% extends "layout.html" %}
 {% block title %}Status{% endblock %}
 {% block content %}
-  <h2>System Status</h2>
-  <div id="sysStatus" class="info small">Loading...</div>
-  <script>
-    async function loadStatus(){
-      const res = await fetch('/api/backend_info');
-      const j = await res.json();
-      document.getElementById('sysStatus').innerText = JSON.stringify(j, null, 2);
-    }
-    loadStatus();
-  </script>
+  <h2>Queue & Active Downloads</h2>
+  <button id="refreshStatusBtn" class="btn">🔄 Refresh</button>
+
+  <h3>Queue</h3>
+  {% include "partials/queue_panel.html" %}
+
+  <h3>Active</h3>
+  <table id="status-active-table" class="books-table">
+    <thead>
+      <tr>
+        <th>Title</th><th>Status</th><th>Progress</th><th>Priority</th><th>Action</th>
+      </tr>
+    </thead>
+    {% include "partials/active_table.html" %}
+  </table>
 {% endblock %}
 EOF
 
@@ -1679,63 +2217,22 @@ cat << 'EOF' > "src/webui/templates/shelf_view.html"
 {% block content %}
   <h2>Shelf: {{ shelf_name }}</h2>
 
-  <form action="{{ url_for('sync_shelf', shelf_name=shelf_name) }}" method="post" style="margin-bottom:1em;">
-    <button class="btn primary">🔄 Sync Now</button>
-  </form>
+  <div class="controls">
+    <button class="btn primary" id="syncBtn">🔄 Sync Now</button>
+    <span id="syncStatus" class="small">Idle</span>
+  </div>
 
-  <table class="books-table">
-    <thead>
-      <tr>
-        <th>#</th>
-        <th>Cover</th>
-        <th>Title</th>
-        <th>Author</th>
-        <th>Series</th>
-        <th>Shelves</th>
-        <th>Added</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for book in books %}
-        <tr>
-          <td>{{ offset + loop.index }}</td>
-          <td>
-            {% if book.cover_local_path %}
-              <img src="{{ url_for('serve_cover', filename=book.cover_local_path) }}" style="height:60px;">
-            {% else %}
-              cover
-            {% endif %}
-          </td>
-          <td><a href="https://www.goodreads.com/book/show/{{ book.goodreads_id }}" target="_blank">{{ book.title }}</a></td>
-          <td>{{ book.author }}</td>
-          <td>
-            {% if book.series_name %}
-              {{ book.series_name }} #{{ book.series_number }}
-            {% endif %}
-          </td>
-          <td>{{ book.shelves }}</td>
-          <td>{{ book.added|default('') }}</td>
-          <td>
-            <form class="inline-form" method="post" action="{{ url_for('api_search_and_queue') }}">
-              <input type="hidden" name="goodreads_id" value="{{ book.goodreads_id }}">
-              <input type="hidden" name="title" value="{{ book.title }}">
-              <input type="hidden" name="author" value="{{ book.author }}">
-              <button class="btn">Download</button>
-            </form>
-          </td>
-        </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div id="shelfTableContainer">
+    {% include "partials/shelf_table.html" %}
+  </div>
 
-  <div class="pagination">
+  <div id="paginationContainer" class="pagination">
     {% if page > 1 %}
-      <a href="{{ url_for('shelf_view', shelf_name=shelf_name, page=page-1) }}">Prev</a>
+      <a href="{{ url_for('shelf_view', shelf=shelf_name, page=page-1, per_page=per_page) }}" class="page-link">Prev</a>
     {% endif %}
-    Page {{ page }}
-    {% if has_next %}
-      <a href="{{ url_for('shelf_view', shelf_name=shelf_name, page=page+1) }}">Next</a>
+    Page {{ page }} / {{ total_pages }}
+    {% if page < total_pages %}
+      <a href="{{ url_for('shelf_view', shelf=shelf_name, page=page+1, per_page=per_page) }}" class="page-link">Next</a>
     {% endif %}
   </div>
 {% endblock %}
@@ -1743,35 +2240,303 @@ EOF
 
 echo "Creating file: src/webui/static/css/style.css"
 cat << 'EOF' > "src/webui/static/css/style.css"
-/* static/css/style.css - lightweight styling */
-:root { --accent:#2c7be5; --muted:#666; --bg:#fafafa; --card:#fff; }
-body { font-family: Inter, Arial, Helvetica, sans-serif; background: var(--bg); color: #111; margin:0; }
-.container { max-width: 1100px; margin: 18px auto; padding: 0 16px; }
-.site-header { background: #0f1724; color: #fff; padding: 12px 0; }
-.site-header .container { display:flex; align-items:center; gap:18px; }
-.brand a { color: #fff; text-decoration:none; font-weight:600; }
-.site-header nav a { color: #dbeafe; margin-right:12px; text-decoration:none; }
-.site-footer { padding: 14px 0; margin-top: 28px; border-top: 1px solid #eee; color:var(--muted); }
+/* static/css/style.css - modern styling */
+:root {
+  --accent: #2c7be5;
+  --muted: #666;
+  --bg: #fafafa;
+  --card: #fff;
+  --success: #4caf50;
+  --danger: #dc3545;
+}
 
-.controls { margin: 12px 0; display:flex; gap:8px; align-items:center; }
-.btn { background:#fff; border:1px solid #ddd; padding:6px 10px; border-radius:6px; cursor:pointer; }
-.btn.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
-.small { font-size:0.9rem; color:var(--muted); }
-.books-table { width:100%; border-collapse:collapse; background:#fff; border-radius:6px; overflow:hidden; box-shadow:0 1px 2px rgba(0,0,0,0.03); }
-.books-table th, .books-table td { padding:10px 8px; border-bottom:1px solid #f1f5f9; }
-.cover { width:48px; height:auto; border-radius:4px; display:block; }
-.cover-cell { width:64px; }
-.pagination { margin-top:12px; }
-.status-panel { margin-top:12px; padding:8px; background:#fff; border:1px solid #eee; border-radius:6px; }
+body {
+  font-family: Inter, Arial, Helvetica, sans-serif;
+  background: var(--bg);
+  color: #111;
+  margin: 0;
+}
 
-.info { background:#fff; padding:8px; border-radius:6px; border:1px solid #eee; }
+.container {
+  max-width: 1100px;
+  margin: 18px auto;
+  padding: 0 16px;
+}
+
+.site-header {
+  background: #0f1724;
+  color: #fff;
+  padding: 12px 0;
+}
+.site-header .container {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.brand a {
+  color: #fff;
+  text-decoration: none;
+  font-weight: 600;
+}
+.site-header nav a {
+  color: #dbeafe;
+  margin-right: 12px;
+  text-decoration: none;
+}
+
+.site-footer {
+  padding: 14px 0;
+  margin-top: 28px;
+  border-top: 1px solid #eee;
+  color: var(--muted);
+}
+
+.controls {
+  margin: 12px 0;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.btn {
+  background: #fff;
+  border: 1px solid #ddd;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+.btn:hover { background: #f1f5f9; }
+.btn.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.btn.primary:hover { background: #1d6fe0; }
+.btn.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.small { font-size: 0.9rem; color: var(--muted); }
+
+.books-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+.books-table th,
+.books-table td {
+  padding: 10px 8px;
+  border-bottom: 1px solid #f1f5f9;
+  vertical-align: middle;
+}
+.books-table th {
+  text-align: left;
+  background: #f9fafb;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.cover {
+  width: 48px;
+  height: auto;
+  border-radius: 4px;
+  display: block;
+}
+.cover-cell { width: 64px; }
+
+.pagination {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.pagination a {
+  padding: 4px 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  text-decoration: none;
+  color: var(--accent);
+  font-size: 0.9rem;
+}
+.pagination a:hover { background: #f1f5f9; }
+
+.status-panel {
+  margin-top: 12px;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #eee;
+  border-radius: 6px;
+}
+
+.info {
+  background: #fff;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid #eee;
+}
+
+/* Progress bars */
+.progress-bar {
+  width: 120px;
+  background: #f1f5f9;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  height: 14px;
+  position: relative;
+  overflow: hidden;
+}
+.progress {
+  background: var(--success);
+  height: 100%;
+  width: 0;
+  transition: width 0.3s ease;
+}
+
+/* Toast notifications */
+#toast-container {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.toast {
+  background: #333;
+  color: #fff;
+  padding: 10px 14px;
+  border-radius: 6px;
+  min-width: 200px;
+  max-width: 300px;
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity 0.3s, transform 0.3s;
+}
+.toast.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.toast.success { background: var(--success); }
+.toast.danger  { background: var(--danger); }
+.toast.info    { background: var(--accent); }
 EOF
 
 echo "Creating file: src/webui/static/js/app.js"
 cat << 'EOF' > "src/webui/static/js/app.js"
 // static/js/app.js
+
 document.addEventListener('DOMContentLoaded', function(){
-  // wire queue + auto-queue buttons if on a shelf page
+  // --- Toast system ---
+  const toastContainer = document.createElement('div');
+  toastContainer.id = 'toast-container';
+  document.body.appendChild(toastContainer);
+
+  function showToast(msg, type="info", timeout=4000){
+    const t = document.createElement('div');
+    t.className = `toast ${type}`;
+    t.innerText = msg;
+    toastContainer.appendChild(t);
+    setTimeout(()=>t.classList.add('visible'), 50);
+    setTimeout(()=>{
+      t.classList.remove('visible');
+      setTimeout(()=>toastContainer.removeChild(t), 300);
+    }, timeout);
+  }
+  window.showToast = showToast;
+
+  // --- WebSocket Centralized ---
+  const ws = new WebSocket(`ws://${location.host}/ws/updates`);
+  const handlers = {};
+
+  ws.onopen = () => {
+    console.log("WS connected");
+    showToast("✅ Connected to updates", "success", 2000);
+    document.querySelectorAll('#wsStatus').forEach(el=>el.innerText="Connected");
+  };
+  ws.onclose = () => {
+    console.log("WS closed");
+    showToast("⚠️ Lost connection to updates", "danger", 4000);
+    document.querySelectorAll('#wsStatus').forEach(el=>el.innerText="Disconnected");
+  };
+
+  ws.onmessage = ev => {
+    try {
+      const msg = JSON.parse(ev.data);
+      console.log("WS event:", msg);
+      if(msg.event && handlers[msg.event]){
+        handlers[msg.event].forEach(fn => fn(msg));
+      }
+      // auto-toast some events
+      if(msg.event === "queued"){
+        showToast(`📥 Queued candidate ${msg.candidate_id || ''}`, "info");
+      }
+      if(msg.event === "sync_done"){
+        showToast(`🔄 Sync finished for shelf ${msg.shelf} (${msg.count || 'unknown'} books)`, "success");
+      }
+    } catch(err){
+      console.error("WS parse error", err, ev.data);
+    }
+  };
+
+  function registerHandler(event, fn){
+    if(!handlers[event]) handlers[event] = [];
+    handlers[event].push(fn);
+  }
+  window.wsHandlers = { register: registerHandler };
+
+  // --- Shared refresh helpers ---
+  async function refreshQueue(queueElId){
+    try {
+      const res = await fetch('/api/status_proxy');
+      const j = await res.json();
+      document.getElementById(queueElId).innerText = JSON.stringify(j, null, 2);
+    } catch(e){
+      console.error("Queue refresh failed", e);
+    }
+  }
+
+  async function refreshActive(tableSelector){
+    try {
+      const activeRes = await fetch('/api/active_proxy');
+      const active = await activeRes.json();
+      const tbody = document.querySelector(tableSelector + ' tbody');
+      tbody.innerHTML = '';
+      if(Array.isArray(active.active_downloads)){
+        active.active_downloads.forEach(item=>{
+          const progress = item.progress || 0;
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${item.title||item.id||'unknown'}</td>
+            <td>${item.status||''}</td>
+            <td>
+              <div class="progress-bar"><div class="progress" style="width:${progress}%;"></div></div>
+              ${progress}%
+            </td>
+            <td>${item.priority||0}</td>
+            <td><button class="btn danger" onclick="cancelDownload('${item.id||item.book_id||item.md5}')">Cancel</button></td>
+          `;
+          tbody.appendChild(tr);
+        });
+      } else {
+        tbody.innerHTML = `<tr><td colspan="5">${JSON.stringify(active)}</td></tr>`;
+      }
+    } catch(e){
+      console.error("Active refresh failed", e);
+    }
+  }
+
+  window.refreshUI = { refreshQueue, refreshActive };
+
+  // --- Queue button (manual) ---
   document.querySelectorAll('.queue-btn').forEach(btn=>{
     btn.addEventListener('click', async function(e){
       const tr = e.target.closest('tr');
@@ -1784,14 +2549,15 @@ document.addEventListener('DOMContentLoaded', function(){
           body: JSON.stringify({id: id, priority: 0})
         });
         const j = await res.json();
-        if (res.ok) alert('Queued: ' + (j.status || JSON.stringify(j)));
-        else alert('Queue error: ' + (j.error || JSON.stringify(j)));
+        if (res.ok) showToast('Queued: ' + (j.status || JSON.stringify(j)), "success");
+        else showToast('Queue error: ' + (j.error || JSON.stringify(j)), "danger");
       } catch(err){
-        alert('Network error: ' + err);
+        showToast('Network error: ' + err, "danger");
       }
     });
   });
 
+  // --- Auto-queue button ---
   document.querySelectorAll('.auto-queue-btn').forEach(btn=>{
     btn.addEventListener('click', async function(e){
       const tr = e.target.closest('tr');
@@ -1814,12 +2580,10 @@ document.addEventListener('DOMContentLoaded', function(){
         const j = await res.json();
         if(res.ok){
           if(j.queued){
-            alert('Auto-queued candidate: ' + (j.candidate && (j.candidate.title || j.candidate.id) || 'ok'));
+            showToast('✅ Auto-queued: ' + (j.candidate && (j.candidate.title || j.candidate.id) || 'ok'), "success");
           } else if(j.candidates){
-            // show top candidates and let user choose
-            const choose = confirm('No confident match. Show top candidate? (OK = choose top)');
-            if(choose && j.candidates && j.candidates.length){
-              // call queue_from_candidate for first candidate
+            const choose = confirm('No confident match. Queue top candidate?');
+            if(choose && j.candidates.length){
               const c = j.candidates[0];
               const qres = await fetch('/api/queue_from_candidate', {
                 method:'POST',
@@ -1827,17 +2591,16 @@ document.addEventListener('DOMContentLoaded', function(){
                 body: JSON.stringify({candidate_id: c.id})
               });
               const qj = await qres.json();
-              if(qres.ok) alert('Queued: ' + JSON.stringify(qj));
-              else alert('Queue failed: ' + JSON.stringify(qj));
+              showToast('Queued: ' + JSON.stringify(qj), "info");
             }
           } else {
-            alert('Search completed: ' + JSON.stringify(j));
+            showToast('Search completed: ' + JSON.stringify(j), "info");
           }
         } else {
-          alert('Search error: ' + JSON.stringify(j));
+          showToast('Search error: ' + JSON.stringify(j), "danger");
         }
       } catch (err){
-        alert('Network error: ' + err);
+        showToast('Network error: ' + err, "danger");
       } finally {
         e.target.disabled = false;
         e.target.innerText = 'Auto Queue';
@@ -1845,7 +2608,7 @@ document.addEventListener('DOMContentLoaded', function(){
     });
   });
 
-  // per-page select
+  // --- Per-page select ---
   const pp = document.getElementById('per_page_select');
   if(pp){
     pp.addEventListener('change', function(){
@@ -1856,51 +2619,97 @@ document.addEventListener('DOMContentLoaded', function(){
     });
   }
 
-  // sync button
+  // --- Sync button (shelf view) ---
   const syncBtn = document.getElementById('syncBtn');
   if(syncBtn){
-    syncBtn.addEventListener('click', async function(){
+    syncBtn.addEventListener('click', async function(ev){
+      ev.preventDefault();
       const shelf = (window.location.pathname.split('/').pop() || 'to-download');
       const res = await fetch('/sync/' + encodeURIComponent(shelf), {method:'POST'});
       const j = await res.json();
       document.getElementById('syncStatus').innerText = j.status || JSON.stringify(j);
-      setTimeout(()=>window.location.reload(), 2000);
+    });
+    window.wsHandlers.register('sync_done', msg=>{
+      document.getElementById('syncStatus').innerText = '✅ Sync finished for ' + msg.shelf;
     });
   }
 
-  // downloads page refresh
+  // --- Downloads page ---
   const refreshBtn = document.getElementById('refreshBtn');
   if(refreshBtn){
-    refreshBtn.addEventListener('click', ()=>{
-      fetch('/api/status_proxy').then(r=>r.json()).then(j=>{
-        document.getElementById('queueStatus').innerText = JSON.stringify(j, null, 2);
-      }).catch(e=>document.getElementById('queueStatus').innerText = e);
-      fetch('/api/active_proxy').then(r=>r.json()).then(j=>{
-        const tbody = document.querySelector('#active-table tbody');
-        tbody.innerHTML = '';
-        if(Array.isArray(j.active_downloads)){
-          j.active_downloads.forEach(item=>{
-            const tr = document.createElement('tr');
-            tr.innerHTML = `<td>${item.title||item.id||'unknown'}</td><td>${item.status||''}</td>
-                            <td>${(item.progress||0)}%</td><td>${item.priority||0}</td>
-                            <td><button class="btn" onclick="cancelDownload('${item.id||item.book_id||item.md5}')">Cancel</button></td>`;
-            tbody.appendChild(tr);
-          });
-        } else {
-          tbody.innerHTML = `<tr><td colspan="5">${JSON.stringify(j)}</td></tr>`;
-        }
-      }).catch(e=>console.error(e));
-    });
+    async function refreshDownloads(){
+      await refreshQueue('queueStatus');
+      await refreshActive('#active-table');
+    }
+    refreshBtn.addEventListener('click', refreshDownloads);
+    window.wsHandlers.register('queued', refreshDownloads);
+    window.wsHandlers.register('sync_done', refreshDownloads);
   }
 
+  // --- Status page ---
+  const refreshStatusBtn = document.getElementById('refreshStatusBtn');
+  if(refreshStatusBtn){
+    async function refreshStatus(){
+      await refreshQueue('queueData');
+      await refreshActive('#status-active-table');
+    }
+    refreshStatusBtn.addEventListener('click', refreshStatus);
+    window.wsHandlers.register('queued', refreshStatus);
+    window.wsHandlers.register('sync_done', refreshStatus);
+  }
+
+  // --- Manual Search page ---
+  const searchForm = document.getElementById('manualSearchForm');
+  if(searchForm){
+    searchForm.addEventListener('submit', async (ev)=>{
+      ev.preventDefault();
+      const query = document.getElementById('searchQuery').value.trim();
+      if(!query) return;
+      const resultBox = document.getElementById('manualSearchResult');
+      resultBox.innerText = 'Searching...';
+      try {
+        const res = await fetch('/api/search_proxy?query=' + encodeURIComponent(query));
+        const j = await res.json();
+        if(res.ok && Array.isArray(j)){
+          let html = '<h3>Results</h3><table class="books-table"><thead><tr><th>Title</th><th>Author</th><th>Action</th></tr></thead><tbody>';
+          j.forEach(c=>{
+            const id = c.id || c.md5 || '';
+            html += `<tr>
+              <td>${c.title||''}</td>
+              <td>${c.author||''}</td>
+              <td><button class="btn queue-result-btn" data-id="${id}">Queue</button></td>
+            </tr>`;
+          });
+          html += '</tbody></table>';
+          resultBox.innerHTML = html;
+          document.querySelectorAll('.queue-result-btn').forEach(btn=>{
+            btn.addEventListener('click', async ()=>{
+              const candId = btn.dataset.id;
+              const qres = await fetch('/api/queue_from_candidate', {
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({candidate_id: candId})
+              });
+              const qj = await qres.json();
+              showToast('Queued: ' + JSON.stringify(qj), "success");
+            });
+          });
+        } else {
+          resultBox.innerText = JSON.stringify(j);
+        }
+      } catch(err){
+        resultBox.innerText = 'Error: ' + err;
+      }
+    });
+  }
 });
 
-// helper used in downloads UI
+// --- Cancel helper ---
 async function cancelDownload(bookId){
-  if(!bookId) return alert('Missing book id');
-  const res = await fetch('/api/download/' + encodeURIComponent(bookId) + '/cancel_proxy', {method: 'DELETE'});
+  if(!bookId) return showToast('Missing book id', "danger");
+  const res = await fetch('/api/download/' + encodeURIComponent(bookId) + '/cancel', {method: 'DELETE'});
   const j = await res.json();
-  alert(JSON.stringify(j));
+  showToast(JSON.stringify(j), res.ok ? "success" : "danger");
 }
 EOF
 
@@ -2565,6 +3374,17 @@ services:
     # Disabled by default until needed
     deploy:
       replicas: 0
+EOF
+
+echo "Creating file: .env"
+cat << 'EOF' > ".env"
+PUID=1000
+PGID=1000
+TZ=Asia/Kolkata
+LOG_LEVEL=DEBUG
+
+# toggle this between True / False as needed
+DRY_RUN=False
 EOF
 
 echo "Creating file: README.md"
