@@ -12,8 +12,18 @@
   </div>
 
   <h3>Active</h3>
-  <table id="status-active-table" class="books-table">
-    <thead><tr><th>Book</th><th>Status</th><th>Progress</th><th>Priority</th><th>Action</th></tr></thead>
-    {% include "partials/active_table.html" %}
-  </table>
+  <div id="statusActiveTableContainer">
+    <table id="status-active-table" class="books-table">
+      <thead>
+        <tr>
+          <th>Book</th>
+          <th>Status</th>
+          <th>Progress</th>
+          <th>Priority</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      {% include "partials/active_table.html" %}
+    </table>
+  </div>
 {% endblock %}

@@ -1,18 +1,27 @@
-<tbody>
+<table class="books-table" id="active-table">
+  <thead>
+    <tr><th>Title</th><th>Status</th><th>Progress</th><th>Priority</th><th>Action</th></tr>
+  </thead>
+  <tbody>
   {% if active_downloads %}
     {% for item in active_downloads %}
       <tr>
         <td>{{ item.title or item.id or 'unknown' }}</td>
         <td>{{ item.status or '' }}</td>
         <td>
-          <div class="progress-bar"><div class="progress" style="width:{{ item.progress or 0 }}%;"></div></div>
+          <div class="progress-bar">
+            <div class="progress" style="width: {{ item.progress or 0 }}%;"></div>
+          </div>
           {{ item.progress or 0 }}%
         </td>
         <td>{{ item.priority or 0 }}</td>
-        <td><button class="btn danger" onclick="cancelDownload('{{ item.id or item.book_id or item.md5 }}')">Cancel</button></td>
+        <td>
+          <button class="btn danger" onclick="cancelDownload('{{ item.id or item.book_id or item.md5 }}')">Cancel</button>
+        </td>
       </tr>
     {% endfor %}
   {% else %}
-    <tr><td colspan="5">No active downloads</td></tr>
+    <tr><td colspan="5"><span class="small">No active downloads</span></td></tr>
   {% endif %}
-</tbody>
+  </tbody>
+</table>

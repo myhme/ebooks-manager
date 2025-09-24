@@ -12,7 +12,7 @@ from urllib.parse import urljoin, urlencode, urlparse, parse_qs
 
 from bs4 import BeautifulSoup
 
-# Selenium imports (used when available)
+# Selenium imports (used and required)
 try:
     from selenium import webdriver
     from selenium.webdriver.chrome.service import Service
@@ -27,13 +27,14 @@ except Exception:
     Options = None
     By = None
     WebDriverWait = None
+    EC = None
     TimeoutException = None
     WebDriverException = None
 
 try:
     from src.utils.database import Database
 except Exception:
-    # fallback to local import if running in different context
+    # fallback to relative import if run in different context
     from utils.database import Database
 
 try:
@@ -45,6 +46,7 @@ LOG = logging.getLogger(__name__)
 
 # cookies that likely indicate logged-in state
 LIKELY_SESSION_COOKIE_NAMES = ['session-id', 'sess', 's', 'auth_token', 'gr_user', 'cgcsess', 'session']
+
 
 class GoodreadsScraper:
     def __init__(self, config: dict):
@@ -88,7 +90,11 @@ class GoodreadsScraper:
             except Exception:
                 LOG.exception("Failed to init CWA client")
 
-        LOG.info("GoodreadsScraper initialized user=%s per_page=%d", self.user_id, self.per_page)
+        LOG.info("GoodreadsScraper initialized user=%s per_page=%d selenium=%s", self.user_id, self.per_page, self._selenium_available)
+
+        # Force Selenium available per your request
+        if not self._selenium_available:
+            raise RuntimeError("Selenium is required but not available in this environment. Please install Selenium and the chromedriver binary.")
 
     def _init_selenium_settings(self):
         # only set these here; actual driver init in _init_driver
@@ -100,12 +106,12 @@ class GoodreadsScraper:
         if self.driver:
             return self.driver
         if not self._selenium_available:
-            LOG.info("Selenium not available in environment")
+            LOG.error("Selenium not available")
             return None
         try:
             options = Options()
             if self.headless:
-                # newer chrome uses '--headless=new'
+                # newer chrome uses '--headless=new' possibly
                 try:
                     options.add_argument('--headless=new')
                 except Exception:
@@ -213,59 +219,106 @@ class GoodreadsScraper:
         return False
 
     def ensure_all_columns_visible(self):
-        """If the shelf settings control is present, click it, enable all checkboxes, set per_page to configured value and save."""
+        """
+        If the shelf settings control is present, open it (if necessary),
+        check all column checkboxes except 'position', set per_page to configured value and save.
+        This tries to make the table include the full set of columns so requests parsing can see them.
+        """
         if not self.driver:
+            LOG.debug("No driver for ensure_all_columns_visible")
             return
         try:
-            # Click the settings link if present
+            # If the settings link exists, click to open
             try:
                 link = self.driver.find_element(By.ID, "shelfSettingsLink")
                 try:
-                    link.click()
-                    time.sleep(0.6)
+                    if not link.is_displayed():
+                        # try JS click anyway
+                        self.driver.execute_script("arguments[0].click();", link)
+                    else:
+                        link.click()
+                    time.sleep(0.4)
                 except Exception:
                     self.driver.execute_script("arguments[0].click();", link)
-                    time.sleep(0.6)
+                    time.sleep(0.4)
             except Exception:
-                # settings link not present - ignore
+                # If there is no link, maybe settings are already visible. continue
                 pass
 
-            # now in settings, check all checkboxes inside #shelfSettings
+            # Wait for settings element (short)
+            try:
+                WebDriverWait(self.driver, 3).until(
+                    lambda d: d.find_element(By.ID, "shelfSettings")
+                )
+            except Exception:
+                # not present - maybe settings not available; continue gracefully
+                pass
+
+            # Find settings container
             try:
                 settings = self.driver.find_element(By.ID, "shelfSettings")
-                # check all input[type=checkbox] within settings
-                checkboxes = settings.find_elements(By.CSS_SELECTOR, "input[type=checkbox]")
-                for cb in checkboxes:
-                    try:
-                        if not cb.is_selected():
-                            self.driver.execute_script("arguments[0].click();", cb)
-                    except Exception:
-                        continue
+            except Exception:
+                settings = None
+
+            if settings:
+                # Check all input[type=checkbox] inside settings except position
+                try:
+                    checkboxes = settings.find_elements(By.CSS_SELECTOR, "input[type=checkbox]")
+                    for cb in checkboxes:
+                        try:
+                            alt = cb.get_attribute("alt") or cb.get_attribute("name") or cb.get_attribute("id") or ""
+                            alt_l = alt.lower()
+                            # Skip position checkbox
+                            if 'position' in alt_l:
+                                continue
+                            # If not selected, click via JS to be robust
+                            if not cb.is_selected():
+                                self.driver.execute_script("arguments[0].click();", cb)
+                                time.sleep(0.05)
+                        except Exception:
+                            continue
+                except Exception:
+                    LOG.debug("Failed to select checkboxes in settings")
+
                 # set per_page select to self.per_page if present
                 try:
                     sel = settings.find_element(By.ID, "user_shelf_per_page")
-                    # set via JS
-                    self.driver.execute_script(f"arguments[0].value = '{self.per_page}'; arguments[0].dispatchEvent(new Event('change'))", sel)
+                    # set via JS and dispatch change
+                    try:
+                        self.driver.execute_script("arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('change'))", sel, str(self.per_page))
+                    except Exception:
+                        # fallback: try selecting using option
+                        for opt in sel.find_elements(By.TAG_NAME, "option"):
+                            if opt.get_attribute("value") == str(self.per_page):
+                                opt.click()
+                                break
                 except Exception:
-                    pass
+                    LOG.debug("Per-page select not found in settings")
 
                 # click Save if present
                 try:
-                    save_btn = settings.find_element(By.CSS_SELECTOR, "input[type=submit][id='save_curr_sett_submit']")
+                    save_btn = settings.find_element(By.CSS_SELECTOR, "input[type=submit]#save_curr_sett_submit")
                     if save_btn:
-                        self.driver.execute_script("arguments[0].click()", save_btn)
-                        time.sleep(0.8)
+                        try:
+                            self.driver.execute_script("arguments[0].click()", save_btn)
+                        except Exception:
+                            try:
+                                save_btn.click()
+                            except Exception:
+                                pass
+                        # allow Goodreads a moment to persist settings
+                        time.sleep(1.0)
                 except Exception:
                     # maybe no save button
                     pass
-            except Exception:
-                # no settings element
-                pass
+
+            # ensure settings closed or stable
+            time.sleep(0.4)
         except Exception:
             LOG.exception("Failed to ensure all columns visible")
 
     def _download_cover(self, url, goodreads_id):
-        """Download cover image and return local path or None."""
+        """Download cover image and return local filename or None."""
         if not url:
             return None
         try:
@@ -366,107 +419,129 @@ class GoodreadsScraper:
                     else:
                         val = a.get_text(" ", strip=True)
                 else:
-                    val = cell.get_text(" ", strip=True)
-                    if key == 'cover':
-                        img = cell.find('img')
-                        if img and img.get('src'):
-                            val = img.get('src')
+                    # handle images in cover cell
+                    img = cell.find('img')
+                    if key == 'cover' and img and img.get('src'):
+                        val = img.get('src')
+                    else:
+                        val = cell.get_text(" ", strip=True)
                 if val:
                     if key in ('position', 'num_pages', 'num_ratings', 'comments', 'votes', 'read_count'):
                         m = re.search(r'(\d+)', val.replace(',', ''))
                         if m:
                             try:
                                 val = int(m.group(1))
-                            except:
+                            except Exception:
                                 pass
                     if key in ('avg_rating',):
                         m = re.search(r'([0-9]+(\.[0-9]+)?)', val)
                         if m:
                             try:
                                 val = float(m.group(1))
-                            except:
+                            except Exception:
                                 pass
             data[key] = val
         return data
 
-    def get_goodreads_books_from_shelf(self, shelf_name='to-download', fetch_details=False, max_pages=50):
+    def get_goodreads_books_from_shelf(self, shelf_name='all', fetch_details=False, max_pages=200):
         """
         Fetch books using the 'ALL' shelf view with pagination using per_page configured.
-        Returns list of book dicts.
+        Uses Selenium (forced) for correct settings and ensures all columns / shelves anchors are visible.
+        Returns list of book dicts for the requested shelf.
+        If shelf_name != 'all', results are filtered in Python from the ALL view.
         """
-        LOG.info("Fetching books from Goodreads shelf='%s' user=%s per_page=%d", shelf_name, self.user_id, self.per_page)
+        LOG.info("Fetching books from Goodreads shelf='%s' user=%s per_page=%d",
+                 shelf_name, self.user_id, self.per_page)
 
         if not self.user_id:
             raise ValueError("goodreads_user_id not set in config")
 
         collected = []
         page_index = 1
+        total_expected = None
 
-        # Try Selenium first, better at toggling settings
-        drv = None
-        if self._selenium_available:
-            drv = self._init_driver()
-        if drv:
+        drv = self._init_driver()
+        if not drv:
+            raise RuntimeError("Selenium driver could not be started")
+
+        try:
             try:
+                self.login_selenium_with_cookies()
+            except Exception:
+                LOG.debug("cookie login attempt failed")
+
+            base_shelf = f"{self.base_url}/review/list/{self.user_id}?utf8=✓&shelf=%23ALL%23&per_page={self.per_page}"
+
+            while page_index <= max_pages:
+                url = f"{base_shelf}&page={page_index}"
+                LOG.info("Selenium navigating to shelf page %s", url)
+                drv.get(url)
+                time.sleep(0.8)
+
                 try:
-                    self.login_selenium_with_cookies()
+                    self.ensure_all_columns_visible()
+                except Exception:
+                    LOG.debug("ensure_all_columns_visible encountered an issue")
+
+                try:
+                    el = drv.find_element(By.CSS_SELECTOR, "a.selectedShelf")
+                    if el:
+                        txt = el.text or ""
+                        m = re.search(r'All\s*\((\d+)\)', txt)
+                        if m:
+                            total_expected = int(m.group(1))
+                            LOG.debug("Total expected books detected: %d", total_expected)
                 except Exception:
                     pass
 
-                base_shelf = f"{self.base_url}/review/list/{self.user_id}?utf8=✓&shelf=%23ALL%23&per_page={self.per_page}"
-                while page_index <= max_pages:
-                    url = f"{base_shelf}&page={page_index}"
-                    LOG.info("Selenium navigating to shelf page %s", url)
-                    drv.get(url)
-                    time.sleep(1.0)
-                    self.ensure_all_columns_visible()
-                    try:
-                        WebDriverWait(drv, 6).until(
-                            lambda d: d.find_elements(By.CSS_SELECTOR, "tbody#booksBody tr, tr.bookalike, table#books tr")
-                        )
-                    except Exception:
-                        LOG.debug("Timed out waiting for shelf table; parsing whatever is present")
-                    html = drv.page_source
-                    page_books, has_next = self._parse_shelf_html_and_save(html, shelf_name, fetch_details)
-                    collected.extend(page_books)
-                    LOG.info("Page %d: collected %d books (cumulative %d)", page_index, len(page_books), len(collected))
-                    if not has_next:
-                        break
-                    page_index += 1
-            except Exception:
-                LOG.exception("Selenium shelf fetch failed; falling back to requests")
-            finally:
                 try:
-                    self._save_cookies_from_selenium()
-                finally:
-                    self._close_driver()
+                    WebDriverWait(drv, 6).until(
+                        lambda d: len(d.find_elements(
+                            By.CSS_SELECTOR, "tbody#booksBody tr, tr.bookalike, table#books tr")) > 0
+                    )
+                except Exception:
+                    LOG.debug("Timed out waiting for shelf table; parsing whatever is present")
 
-        # If Selenium not available or returned nothing, fallback to requests
-        if not collected:
+                html = drv.page_source
+                page_books, has_next = self._parse_shelf_html_and_save(html, 'all', fetch_details)
+                collected.extend(page_books)
+                LOG.info("Page %d: collected %d books (cumulative %d)",
+                         page_index, len(page_books), len(collected))
+
+                if total_expected and len(collected) >= total_expected:
+                    LOG.info("Reached expected total (%d) after page %d", total_expected, page_index)
+                    break
+
+                if not has_next:
+                    LOG.debug("No next page detected; stopping at page %d", page_index)
+                    break
+
+                page_index += 1
+
             try:
-                session = self._load_cookies_into_requests()
-                base_shelf = f"{self.base_url}/review/list/{self.user_id}"
-                params = {'utf8': '✓', 'shelf': '#ALL#', 'per_page': str(self.per_page)}
-                page_index = 1
-                while page_index <= max_pages:
-                    params['page'] = str(page_index)
-                    full = f"{base_shelf}?{urlencode(params)}"
-                    LOG.info("Requests fetching %s", full)
-                    r = session.get(full, timeout=30)
-                    if r.status_code != 200:
-                        LOG.warning("Requests fetch returned %s", r.status_code)
-                        break
-                    page_books, has_next = self._parse_shelf_html_and_save(r.text, shelf_name, fetch_details)
-                    collected.extend(page_books)
-                    LOG.info("Page %d: collected %d books (cumulative %d)", page_index, len(page_books), len(collected))
-                    if not has_next:
-                        break
-                    page_index += 1
+                self._save_cookies_from_selenium()
             except Exception:
-                LOG.exception("Requests shelf fetch failed")
+                LOG.debug("Saving cookies failed")
+        except Exception:
+            LOG.exception("Selenium shelf fetch failed")
+        finally:
+            try:
+                self._close_driver()
+            except Exception:
+                pass
 
-        LOG.info("Total books collected from shelf view: %d", len(collected))
+        # If the user requested a specific shelf, filter from collected ALL-books
+        if shelf_name and shelf_name.lower() != 'all':
+            filtered = [b for b in collected
+                        if b.get('shelves') and shelf_name.lower() in b.get('shelves').lower()]
+            LOG.info("Filtered %d books for shelf='%s' from %d total",
+                     len(filtered), shelf_name, len(collected))
+            return filtered
+
+        LOG.info("Total books collected from ALL shelves: %d (expected=%s)",
+                 len(collected), total_expected)
         return collected
+
 
     def _parse_shelf_html_and_save(self, html, shelf_name, fetch_details=False):
         """
@@ -478,12 +553,12 @@ class GoodreadsScraper:
         has_next = False
         try:
             next_link = soup.select_one('a.next_page')
-            if next_link and ('disabled' not in (next_link.get('class') or [])):
+            if next_link and ('disabled' not in (next_link.get('class') or [])) and next_link.get('href'):
                 has_next = True
             # Goodreads sometimes uses rel=next anchor
             if not has_next:
                 rel_next = soup.find('a', rel='next')
-                if rel_next:
+                if rel_next and rel_next.get('href'):
                     has_next = True
         except Exception:
             has_next = False
@@ -555,6 +630,7 @@ class GoodreadsScraper:
             headers = ['position','cover','title','author','isbn','avg_rating','num_ratings','date_pub','rating','shelves','review','notes','comments','votes','date_read','date_added','format','actions']
 
         books = []
+        # try to select rows: prefer tbody#booksBody's tr if present
         rows = soup.select('tbody#booksBody tr') or soup.select('tr.bookalike') or []
         for row in rows:
             try:
@@ -562,11 +638,11 @@ class GoodreadsScraper:
                 # find goodreads id
                 gid = None
                 if mapped.get('book_url'):
-                    m = re.search(r'/book/show/(\d+)', mapped.get('book_url'))
+                    m = re.search(r'/book/show/(\d+)', mapped.get('book_url') or "")
                     if m:
                         gid = m.group(1)
                     else:
-                        m2 = re.search(r'(\d{6,})', mapped.get('book_url'))
+                        m2 = re.search(r'(\d{6,})', mapped.get('book_url') or "")
                         if m2:
                             gid = m2.group(1)
                 if not gid:
@@ -596,11 +672,55 @@ class GoodreadsScraper:
                 except Exception:
                     cover_local = None
 
-                shelves_val = mapped.get('shelves')
-                if shelves_val:
-                    shelves = ", ".join([s.strip() for s in re.split(r'[,/]|\\|;', shelves_val) if s.strip()])
-                else:
-                    shelves = shelf_name
+                # shelves: prefer anchor links with class shelfLink (captures exact shelf names)
+                shelves_list = []
+                try:
+                    # search for anchors inside the shelves cell
+                    shelves_cell = None
+                    # try to find shelves cell by header position if headers list contains 'shelves'
+                    if 'shelves' in headers:
+                        idx = headers.index('shelves')
+                        cells = row.find_all(['td', 'th'])
+                        if idx < len(cells):
+                            shelves_cell = cells[idx]
+                    # fallback: try to locate by class/selector
+                    if not shelves_cell:
+                        shelves_cell = row.select_one('.field.shelves, td.field.shelves, td.shelves, .shelfList, .shelfLink') or row
+
+                    if shelves_cell:
+                        # find shelfLink anchors
+                        for a in shelves_cell.find_all('a', class_='shelfLink'):
+                            text = (a.get_text(" ", strip=True) or "").strip()
+                            if text:
+                                # anchor may show "read" or "read (something)" — keep the shelf token before any whitespace/paren
+                                # but usually shelf names are simple (e.g., "to-read", "to-download", "owned")
+                                shelves_list.append(text)
+                        # if none found, perhaps the cell has plain text separated by commas
+                        if not shelves_list:
+                            raw_shelves = shelves_cell.get_text(" ", strip=True)
+                            if raw_shelves:
+                                parts = [s.strip() for s in re.split(r'[,/\\;]|(?:\s+and\s+)', raw_shelves) if s.strip()]
+                                shelves_list.extend(parts)
+                except Exception:
+                    LOG.debug("Failed to parse shelves from row")
+
+                # fallback: if still nothing, use the requested shelf_name
+                if not shelves_list:
+                    shelves_list = [shelf_name]
+
+                # normalize shelf names: remove excess text like counts etc.
+                norm_shelves = []
+                for s in shelves_list:
+                    # strip counts e.g. "All (251)" or "read (12)" -> take first token before '('
+                    s2 = re.sub(r'\s*\(.*?\)\s*', '', s).strip()
+                    # sometimes shelf anchor includes user's name or text; keep the token
+                    if s2:
+                        norm_shelves.append(s2)
+                if not norm_shelves:
+                    norm_shelves = [shelf_name]
+
+                # join as comma string for DB
+                shelves_str = ", ".join(norm_shelves)
 
                 book = {
                     'goodreads_id': str(gid),
@@ -624,7 +744,7 @@ class GoodreadsScraper:
                     'date_pub_edition': mapped.get('date_pub_edition'),
                     'num_pages': mapped.get('num_pages'),
                     'rating': mapped.get('rating'),
-                    'shelves': shelves,
+                    'shelves': shelves_str,
                     'review': mapped.get('review'),
                     'notes': mapped.get('notes'),
                     'comments': mapped.get('comments'),
@@ -643,15 +763,16 @@ class GoodreadsScraper:
                     'fetched_at': datetime.utcnow().isoformat()
                 }
 
-                # Save to DB. Use db.save_book (should properly insert/update)
+                # Save to DB. Use db.save_book with explicit shelves list so DB stores proper shelves.
                 try:
-                    self.db.save_book(book, shelves=[shelf_name])
+                    # pass normalized shelf names so DB.save_book sees them explicitly
+                    self.db.save_book(book, shelves=norm_shelves)
                 except Exception:
                     LOG.exception("Failed to save book to DB: %s", gid)
 
                 # Add history (if DB supports)
                 try:
-                    self.db.add_history(action='fetch_shelf_row', book_id=gid, title=title_clean, status='fetched', meta={'shelf': shelf_name})
+                    self.db.add_history(action='fetch_shelf_row', book_id=gid, title=title_clean, status='fetched', meta={'shelves': norm_shelves})
                 except Exception:
                     # not fatal
                     pass

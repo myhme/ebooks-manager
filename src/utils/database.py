@@ -2,8 +2,7 @@
 """
 Robust SQLite database wrapper for ebooks-manager.
 
-- Creates/maintains a `books` table with a wide column set to accept scraper data.
-- Creates a `history` table for sync/fetch events.
+- Maintains `books`, `history`, and `downloads` tables.
 - Provides CRUD + pagination + helper functions used by webui and scrapers.
 """
 
@@ -18,14 +17,19 @@ LOG = logging.getLogger(__name__)
 
 BOOK_COLUMNS = [
     "goodreads_id", "title", "title_clean", "author", "author_first",
-    "series_name", "series_number", "series_id", "pub_date", "pub_date_edition",
+    "series_name", "series_number", "series_id",
+    "pub_date", "pub_date_edition",
     "num_pages", "isbn", "isbn13", "asin", "language",
-    "genres", "json_details", "position", "cover_url", "cover_local_path",
-    "book_url", "avg_rating", "num_ratings", "rating", "shelves",
-    "review", "notes", "comments", "votes", "date_read",
-    "date_started", "date_added", "date_purchased", "purchase_location", "owned",
-    "condition", "format", "recommender", "read_count", "cover_downloaded",
-    "last_synced"
+    "genres", "json_details", "position",
+    "cover_url", "cover_local_path", "book_url",
+    "avg_rating", "num_ratings", "rating",
+    "shelves", "review", "notes", "comments", "votes",
+    "date_read", "date_started", "date_added",
+    "date_purchased", "purchase_location",
+    "owned", "condition", "format",
+    "recommender", "read_count",
+    "cover_downloaded", "last_synced",
+    "fetched_at"
 ]
 
 COLUMN_DEFS = {
@@ -69,7 +73,8 @@ COLUMN_DEFS = {
     "recommender": "TEXT",
     "read_count": "INTEGER",
     "cover_downloaded": "INTEGER",
-    "last_synced": "TEXT"
+    "last_synced": "TEXT",
+    "fetched_at": "TEXT"
 }
 
 
@@ -87,19 +92,15 @@ class Database:
         try:
             cur = self.conn.cursor()
 
+            # books
             columns_sql = ",\n  ".join(
                 f"{col} {COLUMN_DEFS.get(col, 'TEXT')}" for col in BOOK_COLUMNS
             )
-            create_books_sql = f"""
-            CREATE TABLE IF NOT EXISTS books (
-              {columns_sql}
-            );
-            """
-            cur.execute(create_books_sql)
-
+            cur.execute(f"CREATE TABLE IF NOT EXISTS books ({columns_sql});")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_books_date_added ON books(date_added);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_books_title ON books(title);")
 
+            # history
             cur.execute("""
             CREATE TABLE IF NOT EXISTS history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,6 +113,20 @@ class Database:
             );
             """)
             cur.execute("CREATE INDEX IF NOT EXISTS idx_history_ts ON history(ts);")
+
+            # downloads
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS downloads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goodreads_id TEXT,
+                candidate_id TEXT,
+                status TEXT,
+                progress INTEGER,
+                ts TEXT,
+                meta TEXT
+            );
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_downloads_ts ON downloads(ts);")
 
             self.conn.commit()
             self._migrate_add_missing_columns()
@@ -138,17 +153,16 @@ class Database:
         except Exception:
             LOG.exception("DB migration failed while adding missing columns")
 
-    def close(self) -> None:
-        try:
-            self.conn.commit()
-            self.conn.close()
-        except Exception:
-            pass
-
+    # --- Book CRUD ---
     def save_book(self, book: Dict[str, Any], shelves: Optional[List[str]] = None) -> bool:
+        """
+        Save or update a book into DB.
+        Ensures shelves normalization, JSON backup, and timestamps.
+        """
         try:
             cur = self.conn.cursor()
 
+            # fallback json snapshot
             json_details = book.get("json_details")
             if json_details is None:
                 try:
@@ -156,25 +170,28 @@ class Database:
                 except Exception:
                     json_details = json.dumps(str(book))
 
+            # shelves normalization
             shelves_val = None
             if shelves:
                 shelves_val = ", ".join(s.strip() for s in shelves if s and s.strip())
             elif book.get("shelves"):
                 sv = book.get("shelves")
-                if isinstance(sv, list):
-                    shelves_val = ", ".join(sv)
-                else:
-                    shelves_val = str(sv)
+                shelves_val = ", ".join(sv) if isinstance(sv, list) else str(sv)
+
+            # ensure timestamps
+            now = datetime.utcnow().isoformat()
+            book["last_synced"] = now
+            if not book.get("fetched_at"):
+                book["fetched_at"] = now
 
             values = []
             for col in BOOK_COLUMNS:
                 if col == "json_details":
                     values.append(json_details)
-                    continue
-                if col == "shelves":
+                elif col == "shelves":
                     values.append(shelves_val if shelves_val is not None else book.get("shelves"))
-                    continue
-                values.append(book.get(col))
+                else:
+                    values.append(book.get(col))
 
             placeholders = ",".join(["?"] * len(BOOK_COLUMNS))
             cols_sql = ",".join(BOOK_COLUMNS)
@@ -191,9 +208,7 @@ class Database:
             cur = self.conn.cursor()
             cur.execute("SELECT * FROM books WHERE goodreads_id = ?", (goodreads_id,))
             row = cur.fetchone()
-            if not row:
-                return None
-            return dict(row)
+            return dict(row) if row else None
         except Exception:
             LOG.exception("Failed to fetch book by id %s", goodreads_id)
             return None
@@ -201,23 +216,24 @@ class Database:
     def update_book(self, goodreads_id: str, updates: Dict[str, Any]) -> bool:
         try:
             allowed = set(BOOK_COLUMNS)
-            set_parts = []
-            params = []
+            set_parts, params = [], []
             for k, v in updates.items():
                 if k not in allowed:
-                    LOG.debug("Ignoring unknown update column: %s", k)
                     continue
-                set_parts.append(f"{k} = ?")
                 if k == "json_details" and not isinstance(v, str):
-                    params.append(json.dumps(v, ensure_ascii=False))
-                else:
-                    params.append(v)
+                    v = json.dumps(v, ensure_ascii=False)
+                set_parts.append(f"{k} = ?")
+                params.append(v)
             if not set_parts:
                 return False
+
+            # always bump last_synced
+            set_parts.append("last_synced = ?")
+            params.append(datetime.utcnow().isoformat())
+
             params.append(goodreads_id)
             sql = f"UPDATE books SET {', '.join(set_parts)} WHERE goodreads_id = ?"
-            cur = self.conn.cursor()
-            cur.execute(sql, params)
+            self.conn.execute(sql, params)
             self.conn.commit()
             return True
         except Exception:
@@ -226,23 +242,15 @@ class Database:
 
     def delete_book(self, goodreads_id: str) -> bool:
         try:
-            cur = self.conn.cursor()
-            cur.execute("DELETE FROM books WHERE goodreads_id = ?", (goodreads_id,))
+            self.conn.execute("DELETE FROM books WHERE goodreads_id = ?", (goodreads_id,))
             self.conn.commit()
             return True
         except Exception:
             LOG.exception("Failed to delete book %s", goodreads_id)
             return False
 
-    def get_books_by_shelf(
-        self,
-        shelf_name: str,
-        limit: Optional[int] = 30,
-        offset: Optional[int] = 0,
-        order_by: str = "date_added DESC"
-    ) -> List[Dict[str, Any]]:
+    def get_books_by_shelf(self, shelf_name: str, limit: Optional[int] = 30, offset: Optional[int] = 0, order_by: str = "date_added DESC") -> List[Dict[str, Any]]:
         try:
-            cur = self.conn.cursor()
             like_pattern = f"%{shelf_name}%"
             sql = f"SELECT * FROM books WHERE shelves LIKE ? ORDER BY {order_by}"
             params = [like_pattern]
@@ -252,72 +260,44 @@ class Database:
                 if offset:
                     sql += " OFFSET ?"
                     params.append(offset)
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-            return [dict(r) for r in rows]
+            cur = self.conn.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
         except Exception:
             LOG.exception("Failed to read books by shelf")
             return []
 
     def count_books_by_shelf(self, shelf: str) -> int:
-        """Return count of books whose shelves field fuzzy-matches shelf.
-        Mirrors filtering logic in get_books_by_shelf (shelves LIKE '%name%').
-        Used by web UI pagination (shelf_view). Safe if shelf is empty.
-        """
         if not shelf:
             return 0
-        pattern = f"%{shelf}%"
-        with self._lock:
-            cur = self.conn.execute(
-                "SELECT COUNT(1) FROM books WHERE shelves LIKE ?", (pattern,)
-            )
-            row = cur.fetchone()
-        return (row[0] if row and row[0] is not None else 0)
-
-    def get_all_books(self, limit: Optional[int] = None, offset: Optional[int] = 0) -> List[Dict[str, Any]]:
         try:
-            cur = self.conn.cursor()
-            sql = "SELECT * FROM books ORDER BY date_added DESC"
-            params = []
-            if limit is not None:
-                sql += " LIMIT ?"
-                params.append(limit)
-                if offset:
-                    sql += " OFFSET ?"
-                    params.append(offset)
-            cur.execute(sql, params)
-            rows = cur.fetchall()
-            return [dict(r) for r in rows]
+            row = self.conn.execute("SELECT COUNT(1) FROM books WHERE shelves LIKE ?", (f"%{shelf}%",)).fetchone()
+            return int(row[0]) if row else 0
         except Exception:
-            LOG.exception("Failed to fetch all books")
-            return []
+            LOG.exception("Failed to count books by shelf")
+            return 0
 
+    # --- Shelves ---
     def get_shelves(self) -> List[str]:
         try:
-            cur = self.conn.cursor()
-            cur.execute("SELECT shelves FROM books WHERE shelves IS NOT NULL")
-            rows = cur.fetchall()
+            cur = self.conn.execute("SELECT shelves FROM books WHERE shelves IS NOT NULL")
             sset = set()
-            for r in rows:
-                s = r["shelves"]
-                if not s:
-                    continue
-                parts = [p.strip() for p in str(s).split(",")]
-                for p in parts:
-                    if p:
-                        sset.add(p)
+            for r in cur.fetchall():
+                parts = [p.strip() for p in str(r["shelves"]).split(",") if p.strip()]
+                sset.update(parts)
             return sorted(sset)
         except Exception:
             LOG.exception("Failed to compute shelves")
             return []
 
+    # --- History ---
     def add_history(self, action: str, book_id: Optional[str], title: Optional[str], status: str, meta: Optional[Dict[str, Any]] = None) -> bool:
         try:
-            cur = self.conn.cursor()
             ts = datetime.utcnow().isoformat()
             meta_json = json.dumps(meta or {}, ensure_ascii=False)
-            cur.execute("INSERT INTO history (ts, action, book_id, title, status, meta) VALUES (?, ?, ?, ?, ?, ?)",
-                        (ts, action, book_id, title, status, meta_json))
+            self.conn.execute(
+                "INSERT INTO history (ts, action, book_id, title, status, meta) VALUES (?, ?, ?, ?, ?, ?)",
+                (ts, action, book_id, title, status, meta_json),
+            )
             self.conn.commit()
             return True
         except Exception:
@@ -326,36 +306,139 @@ class Database:
 
     def get_history(self, limit: int = 200) -> List[Dict[str, Any]]:
         try:
-            cur = self.conn.cursor()
-            cur.execute("SELECT * FROM history ORDER BY ts DESC LIMIT ?", (limit,))
-            rows = cur.fetchall()
-            out = []
+            cur = self.conn.execute("SELECT * FROM history ORDER BY ts DESC LIMIT ?", (limit,))
+            rows, out = cur.fetchall(), []
             for r in rows:
                 rr = dict(r)
                 try:
                     rr["meta"] = json.loads(rr.get("meta") or "{}")
                 except Exception:
-                    rr["meta"] = rr.get("meta")
+                    pass
                 out.append(rr)
             return out
         except Exception:
             LOG.exception("Failed to get history")
             return []
 
+    # --- Downloads ---
+    def create_download(self, goodreads_id: str, candidate_id: str, status: str = "queued", meta: Optional[Dict[str, Any]] = None) -> bool:
+        try:
+            ts = datetime.utcnow().isoformat()
+            self.conn.execute(
+                "INSERT INTO downloads (goodreads_id, candidate_id, status, progress, ts, meta) VALUES (?, ?, ?, ?, ?, ?)",
+                (goodreads_id, candidate_id, status, 0, ts, json.dumps(meta or {})),
+            )
+            self.conn.commit()
+            return True
+        except Exception:
+            LOG.exception("Failed to create download entry")
+            return False
+
+    def update_download(self, candidate_id: str, status: Optional[str] = None, progress: Optional[int] = None, meta: Optional[Dict[str, Any]] = None) -> bool:
+        try:
+            set_parts, params = [], []
+            if status:
+                set_parts.append("status = ?")
+                params.append(status)
+            if progress is not None:
+                set_parts.append("progress = ?")
+                params.append(progress)
+            if meta:
+                set_parts.append("meta = ?")
+                params.append(json.dumps(meta))
+            if not set_parts:
+                return False
+            params.append(candidate_id)
+            self.conn.execute(f"UPDATE downloads SET {', '.join(set_parts)} WHERE candidate_id = ?", params)
+            self.conn.commit()
+            return True
+        except Exception:
+            LOG.exception("Failed to update download %s", candidate_id)
+            return False
+
+    def mark_download_failed(self, candidate_id: str, error: str) -> bool:
+        return self.update_download(candidate_id, status="failed", meta={"error": error})
+
+    def get_active_downloads(self) -> List[Dict[str, Any]]:
+        try:
+            cur = self.conn.execute("SELECT * FROM downloads WHERE status IN ('queued','downloading') ORDER BY ts DESC")
+            return [dict(r) for r in cur.fetchall()]
+        except Exception:
+            LOG.exception("Failed to fetch active downloads")
+            return []
+
+    def get_all_downloads(self, limit: int = 100) -> List[Dict[str, Any]]:
+        try:
+            cur = self.conn.execute("SELECT * FROM downloads ORDER BY ts DESC LIMIT ?", (limit,))
+            return [dict(r) for r in cur.fetchall()]
+        except Exception:
+            LOG.exception("Failed to fetch downloads")
+            return []
+
+    # --- Utils ---
     def vacuum(self) -> None:
         try:
-            cur = self.conn.cursor()
-            cur.execute("VACUUM;")
+            self.conn.execute("VACUUM;")
             self.conn.commit()
         except Exception:
             LOG.exception("VACUUM failed")
 
     def row_count(self) -> int:
         try:
-            cur = self.conn.cursor()
-            cur.execute("SELECT COUNT(1) AS c FROM books")
-            r = cur.fetchone()
-            return int(r["c"]) if r else 0
+            r = self.conn.execute("SELECT COUNT(1) FROM books").fetchone()
+            return int(r[0]) if r else 0
         except Exception:
             LOG.exception("Failed to count rows")
             return 0
+
+    def close(self) -> None:
+        try:
+            self.conn.commit()
+            self.conn.close()
+        except Exception:
+            pass
+
+    def get_books(
+        self,
+        search: Optional[str] = None,
+        shelf: Optional[str] = None,
+        order_by: str = "title COLLATE NOCASE ASC",
+        limit: Optional[int] = 50,
+        offset: Optional[int] = 0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch books with optional search, shelf filter, ordering, and pagination.
+        - search: free text applied to title/author/series_name
+        - shelf: filter books containing this shelf name
+        - order_by: SQL ORDER BY clause (default = title alphabetical)
+        - limit/offset: pagination
+        """
+        try:
+            clauses, params = [], []
+
+            if search:
+                like = f"%{search}%"
+                clauses.append("(title LIKE ? OR author LIKE ? OR series_name LIKE ?)")
+                params.extend([like, like, like])
+
+            if shelf:
+                clauses.append("shelves LIKE ?")
+                params.append(f"%{shelf}%")
+
+            where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+            sql = f"SELECT * FROM books {where_sql} ORDER BY {order_by}"
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(limit)
+                if offset:
+                    sql += " OFFSET ?"
+                    params.append(offset)
+
+            cur = self.conn.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
+        except Exception:
+            LOG.exception("Failed to fetch books with search=%s shelf=%s", search, shelf)
+            return []
+
+

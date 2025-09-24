@@ -1,10 +1,10 @@
 {% extends "layout.html" %}
-{% block title %}Search{% endblock %}
+{% block title %}Manual Search{% endblock %}
 {% block content %}
   <h2>Manual Search</h2>
   <form id="manualSearchForm" class="controls">
-    <input id="searchQuery" type="text" placeholder="title, author or ISBN" style="flex:1">
-    <button class="btn" type="submit">Search</button>
+    <input type="text" id="searchQuery" placeholder="Enter title, author, or ISBN" style="flex:1; padding:6px; border:1px solid #ddd; border-radius:4px;">
+    <button class="btn primary">Search</button>
   </form>
-  <div id="manualSearchResult"></div>
+  <div id="manualSearchResult" class="status-panel small">No results yet.</div>
 {% endblock %}

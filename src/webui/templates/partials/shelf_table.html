@@ -1,12 +1,26 @@
 <table class="books-table" id="shelf-table">
   <thead>
-    <tr><th>#</th><th>Cover</th><th>Title</th><th>Author</th><th>Shelves</th><th>Added</th><th>Actions</th></tr>
+    <tr>
+      <th>#</th>
+      <th>Cover</th>
+      <th>Title</th>
+      <th>Author</th>
+      <th>Shelves</th>
+      <th>Added</th>
+      <th>Actions</th>
+    </tr>
   </thead>
   <tbody>
   {% for book in books %}
-    <tr data-goodreads-id="{{ book.goodreads_id }}" data-title="{{ book.title }}" data-author="{{ book.author }}" data-isbn="{{ book.get('isbn','') }}">
+    <tr data-goodreads-id="{{ book.goodreads_id }}" data-title="{{ book.title }}" data-author="{{ book.author }}" data-isbn="{{ book.isbn or '' }}">
       <td>{{ offset + loop.index }}</td>
-      <td class="cover-cell">{% if book.cover_local_path %}<img src="/covers/{{ book.cover_local_path }}" class="cover">{% else %}<span class="small">No cover</span>{% endif %}</td>
+      <td class="cover-cell">
+        {% if book.cover_local_path %}
+          <img src="/covers/{{ book.cover_local_path }}" class="cover">
+        {% else %}
+          <span class="small">No cover</span>
+        {% endif %}
+      </td>
       <td><a href="https://www.goodreads.com/book/show/{{ book.goodreads_id }}" target="_blank">{{ book.title }}</a></td>
       <td>{{ book.author }}</td>
       <td>{{ book.shelves }}</td>

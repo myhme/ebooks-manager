@@ -1,7 +1,7 @@
-<div id="queuePanelContent">
+<div id="queuePanelContent" class="status-panel">
   {% if queue_data %}
     <pre>{{ queue_data | tojson(indent=2) }}</pre>
   {% else %}
-    <pre>No queue data</pre>
+    <p><span class="small">No queue data available.</span></p>
   {% endif %}
 </div>

@@ -6,6 +6,7 @@
   - partial AJAX refresh (refreshPageSection)
   - bindings for queue/auto-queue buttons and pagination/per-page
   - pushState support for shelf, downloads, status, search
+  - real-time download progress updates
 */
 (function () {
   // --- Toast system ---
@@ -32,12 +33,18 @@
     try {
       const msg = JSON.parse(ev.data);
       if(msg.event && handlers[msg.event]) handlers[msg.event].forEach(fn=>fn(msg));
+
       // generic notifications for some events
       if(msg.event === 'queued') showToast('Queued: '+(msg.candidate_id||''),'info');
       if(msg.event === 'sync_done') showToast('Sync finished: '+(msg.shelf||''),'success');
       if(msg.event === 'config_updated') {
         const ta = document.getElementById('configTextarea');
         if(ta) { ta.value = JSON.stringify(msg.config||{}, null, 2); showToast('Config updated (whitelisted)','info'); }
+      }
+
+      // 🔥 Real-time progress updates
+      if(msg.event === 'download_progress'){
+        updateDownloadProgress(msg);
       }
     } catch(e) { console.error('ws parse', e); }
   };
@@ -104,7 +111,6 @@
           container.innerHTML = newTable.outerHTML;
           bindQueueButtons(container);
         }
-        // refresh pagination partials by directly updating links/text (simpler: update url)
         const newUrl = `/shelf/${encodeURIComponent(shelf)}?page=${page}&per_page=${per}`;
         history.pushState({page:parseInt(page), per_page:parseInt(per)}, '', newUrl);
         showToast('Shelf refreshed', 'info');
@@ -112,7 +118,6 @@
       }
 
       if(pageType === 'downloads'){
-        // queue panel
         const qres = await fetch('/downloads/partials/queue');
         if(qres.ok){
           const qhtml = await qres.text();
@@ -121,7 +126,6 @@
           const panel = document.querySelector('#queuePanel');
           if(newQ && panel) panel.innerHTML = newQ.innerHTML;
         }
-        // active table
         const tres = await fetch('/downloads/partials/active');
         if(tres.ok){
           const thtml = await tres.text();
@@ -199,6 +203,33 @@
     }
   }
 
+  // --- 🔥 Update downloads progress in-place ---
+  function updateDownloadProgress(msg){
+    const { id, progress, status, title } = msg;
+    const table = document.querySelector('#active-table tbody') || document.querySelector('#status-active-table tbody');
+    if(!table) return;
+
+    let row = table.querySelector(`tr[data-id="${id}"]`);
+    if(!row){
+      // create new row if not exists
+      row = document.createElement('tr');
+      row.dataset.id = id;
+      row.innerHTML = `
+        <td>${title||id}</td>
+        <td class="dl-status">${status||''}</td>
+        <td class="dl-progress"><div class="progress-bar"><div class="progress" style="width:${progress||0}%"></div></div> ${progress||0}%</td>
+        <td>0</td>
+        <td><button class="btn danger" onclick="cancelDownload('${id}')">Cancel</button></td>
+      `;
+      table.appendChild(row);
+    } else {
+      row.querySelector('.dl-status').innerText = status;
+      const pb = row.querySelector('.dl-progress .progress');
+      if(pb) pb.style.width = (progress||0) + '%';
+      row.querySelector('.dl-progress').lastChild.textContent = ` ${progress||0}%`;
+    }
+  }
+
   // --- initial bindings based on page ---
   document.addEventListener('DOMContentLoaded', ()=>{
     bindQueueButtons(document);
@@ -207,24 +238,20 @@
     // Sync WS events to refresh pages
     wsHandlers.register('queued', ()=>{ if(location.pathname.startsWith('/downloads')||location.pathname.startsWith('/status')) refreshPageSection(location.pathname.startsWith('/downloads')? 'downloads' : 'status'); });
     wsHandlers.register('sync_done', msg=>{
-      // if on shelf page and this shelf matches, refresh shelf only
       const currentShelf = location.pathname.split('/').pop();
       if(location.pathname.startsWith('/shelf') && msg.shelf === currentShelf){
         refreshPageSection('shelf', { shelf: currentShelf, page: new URLSearchParams(window.location.search).get('page')||1, per_page: new URLSearchParams(window.location.search).get('per_page')||30 });
       } else {
-        // also refresh downloads/status to pick up new queue items
         if(location.pathname.startsWith('/downloads')) refreshPageSection('downloads');
         if(location.pathname.startsWith('/status')) refreshPageSection('status');
       }
     });
 
-    // Wire buttons if present
     const refreshBtn = document.getElementById('refreshBtn');
     if(refreshBtn) refreshBtn.onclick = ()=>refreshPageSection('downloads');
     const refreshStatusBtn = document.getElementById('refreshStatusBtn');
     if(refreshStatusBtn) refreshStatusBtn.onclick = ()=>refreshPageSection('status');
 
-    // Manual search form
     const sf = document.getElementById('manualSearchForm');
     if(sf){
       sf.onsubmit = async ev=>{
@@ -233,13 +260,11 @@
         if(!q) return;
         await refreshPageSection('search', { q });
       };
-      // support restoring query from URL on load
       const uparams = new URLSearchParams(window.location.search);
       const q0 = uparams.get('q');
       if(q0) refreshPageSection('search', { q: q0 });
     }
 
-    // shelf page: bind sync button
     const syncBtn = document.getElementById('syncBtn');
     if(syncBtn){
       syncBtn.onclick = async ()=>{
@@ -252,7 +277,6 @@
       };
     }
 
-    // push initial state for shelf
     if(location.pathname.startsWith('/shelf/')){
       const page = parseInt(new URLSearchParams(window.location.search).get('page')||'1');
       const per = parseInt(new URLSearchParams(window.location.search).get('per_page')||'30');
@@ -261,7 +285,6 @@
       history.replaceState({}, '', window.location.href);
     }
 
-    // popstate handling for back/forward
     window.addEventListener('popstate', ev=>{
       const path = location.pathname;
       if(path.startsWith('/shelf/')){

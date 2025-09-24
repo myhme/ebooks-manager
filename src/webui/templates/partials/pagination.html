@@ -1,9 +1,14 @@
-<div id="paginationContainer" class="pagination">
+<div class="pagination">
   {% if page > 1 %}
-    <a href="{{ url_for('shelf_view', shelf=shelf_name, page=page-1, per_page=per_page) }}" class="page-link">Prev</a>
+    <a href="?page={{ page-1 }}&per_page={{ per_page }}" class="page-link">Prev</a>
   {% endif %}
-  Page {{ page }} / {{ total_pages }}
+  <span>Page {{ page }} of {{ total_pages }}</span>
   {% if page < total_pages %}
-    <a href="{{ url_for('shelf_view', shelf=shelf_name, page=page+1, per_page=per_page) }}" class="page-link">Next</a>
+    <a href="?page={{ page+1 }}&per_page={{ per_page }}" class="page-link">Next</a>
   {% endif %}
+  <select id="per_page_select">
+    {% for opt in [10,20,30,50,100] %}
+      <option value="{{ opt }}" {% if per_page == opt %}selected{% endif %}>{{ opt }}/page</option>
+    {% endfor %}
+  </select>
 </div>

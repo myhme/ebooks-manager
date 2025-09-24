@@ -6,8 +6,8 @@ import os
 
 def setup_logger(level: str = "INFO"):
     """
-    Configure application logging for Docker-native use (stdout/stderr only).
-    File logging is removed — Docker handles log collection.
+    Configure application logging for Docker-native use.
+    Logs only to stdout. No file logging.
     """
     log_level = getattr(logging, level.upper(), logging.INFO)
 
@@ -19,9 +19,7 @@ def setup_logger(level: str = "INFO"):
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setLevel(log_level)
     stream_handler.setFormatter(
-        logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        )
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     )
 
     logging.basicConfig(
@@ -35,7 +33,7 @@ def setup_logger(level: str = "INFO"):
     logging.getLogger("selenium").setLevel(logging.WARNING)
 
     logger = logging.getLogger()
-    logger.debug(f"Logger initialized at level: {log_level}")
+    logger.debug(f"Logger initialized at level: {level}")
     return logger
 
 
