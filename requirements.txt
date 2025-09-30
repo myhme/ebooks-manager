@@ -4,9 +4,14 @@ httpx
 jinja2
 python-multipart
 apscheduler
+
 # Keep existing scraping/DB deps
 beautifulsoup4
 lxml
 requests
 selenium
 sqlite-utils
+
+# Matching + testing
+rapidfuzz
+pytest

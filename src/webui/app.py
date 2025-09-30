@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# src/webui/app.py
 """
 src/webui/app.py
 Patched FastAPI WebUI with:
@@ -7,6 +9,7 @@ Patched FastAPI WebUI with:
 - proxy endpoints to CWA
 - page endpoints + partial endpoints for AJAX refresh
 - admin config endpoints (save -> broadcast safe whitelist)
+- robust CWA URL normalization and additional debug logging for search responses
 """
 
 import asyncio
@@ -60,12 +63,14 @@ def load_config() -> Dict[str, Any]:
     try:
         return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
+        # fallback to environment variables
         return {k.lower(): v for k, v in os.environ.items()}
 
 
 DB_PATH = os.getenv("DATABASE_PATH") or load_config().get("database_path") or "/app/data/databases/goodreads.db"
 _db = Database(DB_PATH)
 
+# single AsyncClient used by the app
 http_client = httpx.AsyncClient(timeout=30.0)
 
 task_queue: "asyncio.Queue[dict]" = asyncio.Queue()
@@ -107,6 +112,48 @@ def _get_cwa_config():
     return base.rstrip("/"), user, pw
 
 
+def _build_cwa_url(base: str, path: str) -> str:
+    """
+    Build a correct URL to talk to the CWA backend, handling several variants:
+      - base might already include '/request/api' (e.g. http://host:8084/request/api)
+      - base might include '/request' (e.g. http://host:8084/request)
+      - base might include '/api' (e.g. http://host:8084/api) or just host (http://host:8084)
+      - path might be 'api/status' or '/api/status' or 'status' or '/request/api/status'
+    Goal: produce one well-formed URL which points to the CWA API endpoint, typically under:
+      - /request/api/<endpoint>  (preferred default)
+    """
+    b = base.rstrip("/")
+    p = path.lstrip("/")
+
+    # If base already contains /request/api or /api at the end, drop duplicate prefix from path
+    if b.endswith("/request/api") or b.endswith("/api"):
+        if p.startswith("request/api/"):
+            p = p[len("request/api/"):]
+        elif p.startswith("api/"):
+            p = p[len("api/"):]
+        return f"{b}/{p}"
+
+    # If base ends with /request (but not /request/api)
+    if b.endswith("/request"):
+        # If path begins with request/api or api, avoid duplicating
+        if p.startswith("request/api/"):
+            p = p[len("request/api/"):]
+            return f"{b}/{p}"
+        if p.startswith("api/"):
+            return f"{b}/{p}"
+        return f"{b}/api/{p}"
+
+    # base is host-only (no /request, no /api)
+    # If path starts with request/api -> just append
+    if p.startswith("request/api/"):
+        return f"{b}/{p}"
+    # If path starts with api/ -> prefix with request
+    if p.startswith("api/"):
+        return f"{b}/request/{p}"
+    # typical case: add /request/api/
+    return f"{b}/request/api/{p}"
+
+
 async def call_cwa_api(
     path: str,
     method: str = "GET",
@@ -114,10 +161,23 @@ async def call_cwa_api(
     json_body: Optional[dict] = None,
     timeout: float = 10.0,
 ):
+    """
+    Call the Calibre-Web-Automated-Book-Downloader backend.
+
+    Normalizes base URL + path so callers can pass 'api/status', '/api/search', 'search', etc.
+    Logs detailed info about request/response for easier debugging.
+    """
     base, user, pw = _get_cwa_config()
     if not base:
+        LOG.error("❌ No CWA backend configured")
         return False, 500, {"error": "No backend configured"}
-    url = f"{base}/{path.lstrip('/')}"
+
+    url = _build_cwa_url(base, path)
+    auth_info = "with-auth" if (user and pw) else "no-auth"
+
+    LOG.info("➡️  CWA API request: %s %s params=%s json=%s %s timeout=%s",
+             method, url, params, json_body, auth_info, timeout)
+
     try:
         r = await http_client.request(
             method,
@@ -127,13 +187,45 @@ async def call_cwa_api(
             auth=(user, pw) if user and pw else None,
             timeout=timeout,
         )
+
         content_type = r.headers.get("content-type", "")
+        status = r.status_code
+
+        # Capture a snippet of the raw response (up to 2k chars) for debugging
+        text_snippet = None
+        if r.content and len(r.content) > 0:
+            try:
+                text_snippet = r.content.decode("utf-8", errors="replace")[:2000]
+            except Exception:
+                text_snippet = str(r.content)[:2000]
+
+        LOG.info("⬅️  CWA API response: %s %s content-type=%s len=%s",
+                 status, url, content_type, len(r.content) if r.content else 0)
+
         if "application/json" in content_type:
-            return True, r.status_code, r.json()
-        return True, r.status_code, r.text
+            try:
+                parsed = r.json()
+                if isinstance(parsed, dict):
+                    LOG.debug("✅ Parsed JSON (dict) keys=%s", list(parsed.keys()))
+                elif isinstance(parsed, list):
+                    LOG.debug("✅ Parsed JSON (list) length=%d", len(parsed))
+                else:
+                    LOG.debug("✅ Parsed JSON type=%s", type(parsed).__name__)
+                return True, status, parsed
+            except Exception as e:
+                LOG.warning("⚠️ Failed to parse JSON from %s: %s", url, e)
+                if text_snippet:
+                    LOG.debug("Raw CWA response snippet: %s", text_snippet)
+                return False, 502, {"error": "invalid_json", "raw": text_snippet}
+
+        # Non-JSON responses (HTML, text, etc.)
+        LOG.debug("ℹ️ Non-JSON response snippet: %s", text_snippet)
+        return True, status, text_snippet or r.text
+
     except httpx.RequestError as e:
-        LOG.exception("Backend request failed: %s", e)
+        LOG.exception("❌ Backend request failed: %s", e)
         return False, 502, {"error": str(e)}
+
 
 
 # -------------------------
@@ -146,6 +238,7 @@ async def queue_worker():
         try:
             typ = job.get("type")
             if typ == "queue_candidate":
+                # queue using the CWA API search endpoint
                 await call_cwa_api(
                     "/api/download",
                     method="GET",
@@ -182,7 +275,11 @@ async def on_startup():
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    app.state.worker_task.cancel()
+    # Cancel worker and close client
+    try:
+        app.state.worker_task.cancel()
+    except Exception:
+        pass
     await http_client.aclose()
 
 
@@ -195,6 +292,7 @@ async def ws_updates(ws: WebSocket):
     ws_connections.add(ws)
     try:
         while True:
+            # keep connection alive; client doesn't need to send anything meaningful
             await ws.receive_text()
     except WebSocketDisconnect:
         ws_connections.discard(ws)
@@ -220,6 +318,7 @@ ADMIN_PASS = os.getenv("ADMIN_PASS")
 
 
 def check_basic_auth(creds: HTTPBasicCredentials = Depends(security)):
+    # if credentials not set in env, allow access
     if not ADMIN_USER or not ADMIN_PASS:
         return True
     if creds.username == ADMIN_USER and creds.password == ADMIN_PASS:
@@ -281,13 +380,16 @@ async def downloads_page(request: Request):
 @app.get("/downloads/partials/queue", response_class=HTMLResponse)
 async def downloads_queue_partial(request: Request):
     ok, _, data = await call_cwa_api("api/status")
-    return TEMPLATES.TemplateResponse("partials/queue_panel.html", {"request": request, "queue_data": data if ok else {"error": data}})
+    # keep shape expected by template
+    queue_data = data if ok else {"error": data}
+    return TEMPLATES.TemplateResponse("partials/queue_panel.html", {"request": request, "queue_data": queue_data})
 
 
 @app.get("/downloads/partials/active", response_class=HTMLResponse)
 async def downloads_active_partial(request: Request):
     ok, _, data = await call_cwa_api("api/downloads/active")
-    return TEMPLATES.TemplateResponse("partials/active_table.html", {"request": request, "active_data": data if ok else {"active_downloads": []}})
+    active_data = data if ok else {"active_downloads": []}
+    return TEMPLATES.TemplateResponse("partials/active_table.html", {"request": request, "active_data": active_data})
 
 
 @app.get("/status", response_class=HTMLResponse)
@@ -298,17 +400,71 @@ async def status_page(request: Request):
 @app.get("/status/partials/queue", response_class=HTMLResponse)
 async def status_queue_partial(request: Request):
     ok, _, data = await call_cwa_api("api/status")
-    return TEMPLATES.TemplateResponse("partials/queue_panel.html", {"request": request, "queue_data": data if ok else {"error": data}})
+    queue_data = data if ok else {"error": data}
+    return TEMPLATES.TemplateResponse("partials/queue_panel.html", {"request": request, "queue_data": queue_data})
 
 
 @app.get("/status/partials/active", response_class=HTMLResponse)
 async def status_active_partial(request: Request):
     ok, _, data = await call_cwa_api("api/downloads/active")
-    return TEMPLATES.TemplateResponse("partials/active_table.html", {"request": request, "active_data": data if ok else {"active_downloads": []}})
+    active_data = data if ok else {"active_downloads": []}
+    return TEMPLATES.TemplateResponse("partials/active_table.html", {"request": request, "active_data": active_data})
 
 
+# -------------------------
+# Manual Search (page + partial)
+# -------------------------
 @app.get("/manual_search", response_class=HTMLResponse)
-async def manual_search_page(request: Request):
+async def manual_search_page(request: Request, q: Optional[str] = None, partial: bool = False):
+    """
+    Two modes:
+      - full page render (no results) - the template's JS will call ?partial=1 to fetch results
+      - partial rendering (AJAX) - returns the partial with results inserted
+    """
+    if partial:
+        LOG.info("🔍 Manual search request (partial) q=%s", q)
+        results = []
+        if q:
+            ok, code, data = await call_cwa_api("/api/search", params={"query": q})
+            if not ok:
+                LOG.warning("❌ CWA search proxy failed for query=%s code=%s", q, code)
+                # If backend returned a raw snippet or error, include helpful debug in logs
+                if isinstance(data, (str, bytes)):
+                    snippet = str(data)[:2000]
+                else:
+                    snippet = json.dumps(data)[:2000]
+                LOG.debug("Raw CWA search response (snippet) for q=%s: %s", q, snippet)
+            else:
+                # backend may return list or { "books": [...] } or { "results": [...] }
+                if isinstance(data, list):
+                    results = data
+                    LOG.info("✅ CWA search for q=%s returned list with %d items", q, len(results))
+                elif isinstance(data, dict):
+                    results = data.get("books") or data.get("results") or data.get("items") or []
+                    LOG.info("✅ CWA search for q=%s returned dict with keys=%s -> %d results",
+                             q, list(data.keys()), len(results))
+                else:
+                    results = []
+                    LOG.warning("⚠️ Unexpected CWA search response type for q=%s: %s",
+                                q, type(data).__name__)
+
+            if results:
+                try:
+                    LOG.debug("First result sample: %s", json.dumps(results[0], indent=2)[:1000])
+                except Exception as e:
+                    LOG.warning("Failed to log first result sample: %s", e)
+
+            LOG.info("✅ CWA search for q=%s returned %s items", q, len(results))
+
+
+        # render partial template (partials/search_results.html expected)
+        return TEMPLATES.TemplateResponse(
+            "partials/search_results.html",
+            {"request": request, "results": results},
+        )
+
+    # Full page render (empty until JS loads partials)
+    LOG.info("🌐 Manual search page load (full, no query yet)")
     return TEMPLATES.TemplateResponse("search.html", {"request": request})
 
 
@@ -343,13 +499,13 @@ async def api_download_proxy(book_id: str = Form(...)):
 
 @app.get("/api/status_proxy")
 async def api_status_proxy():
-    ok, code, data = await call_cwa_api("/api/status")
+    ok, code, data = await call_cwa_api("api/status")
     return JSONResponse(status_code=code, content=data if ok else {"error": data})
 
 
 @app.get("/api/active_proxy")
 async def api_active_proxy():
-    ok, code, data = await call_cwa_api("/api/downloads/active")
+    ok, code, data = await call_cwa_api("api/downloads/active")
     return JSONResponse(status_code=code, content=data if ok else {"error": data})
 
 
@@ -372,9 +528,13 @@ async def api_search_and_queue(payload: dict):
 
     ok, _, resp = await call_cwa_api("/api/search", "GET", params=params)
     if not ok:
+        LOG.error("Backend search failed for %s: %s", query, resp)
         raise HTTPException(502, "Backend search failed")
-    candidates = resp if isinstance(resp, list) else resp.get("books", [])
+
+    candidates = resp if isinstance(resp, list) else resp.get("books", []) if isinstance(resp, dict) else []
     if not candidates:
+        # helpful debug if backend returned something unexpected
+        LOG.debug("Search returned no candidates for query=%s; raw response: %s", query, resp)
         return {"error": "No candidates"}
 
     def score(c):

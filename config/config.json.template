@@ -9,5 +9,22 @@
     "log_file": "/app/logs/sync_log.txt",
     "history_file": "/app/logs/history.json",
     "cache_dir": "/app/data/cache",
-    "goodreads_per_page": 100
+    "goodreads_per_page": 100,
+    "booklore_api_url": "http://book.com:8080",
+    "booklore_username": "docker",
+    "booklore_password": "docker",
+    "booklore_token_cache": "/app/data/cache/booklore_tokens.json",
+    "reconcile_interval_minutes": 1440,
+    "reconcile_mode": "periodic",
+    "booklore_matching": {
+        "threshold": 600,
+        "weights": {
+            "goodreads_id": 10000,
+            "isbn": 8000,
+            "title_exact": 3000,
+            "author_exact": 2000,
+            "title_fuzzy": 1000,
+            "author_fuzzy": 800
+        }
+    }
 }

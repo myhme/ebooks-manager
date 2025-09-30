@@ -1,0 +1,28 @@
+{% if results %}
+  <ul class="list-group mt-2">
+    {% for book in results %}
+      <li class="list-group-item d-flex justify-content-between align-items-center">
+        <div>
+          <strong>{{ book.title }}</strong>
+          {% if book.author %}
+            <span class="text-muted">by {{ book.author }}</span>
+          {% endif %}
+          {% if book.year %}
+            <span class="badge bg-light text-dark">{{ book.year }}</span>
+          {% endif %}
+        </div>
+        <div>
+          {% set bid = book.id or book.md5 or book.book_id %}
+          {% if bid %}
+            <button class="btn btn-sm btn-primary"
+                    onclick="queueCandidate('{{ bid }}')">
+              Queue
+            </button>
+          {% endif %}
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p class="text-muted">No results found.</p>
+{% endif %}
